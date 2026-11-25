@@ -84,7 +84,8 @@ Char.prototype.poke=function(power){
   if(this.mode==='stagger')return;
   var J=this.J;
   J.spineP.v+=2.4*power; J.bodyP.v+=1.1*power; J.raiseL.v+=2.0*power; J.raiseR.v-=2.0*power;
-  if(power>=1.8){ this.mode='stagger'; this.fallTimer=0; }
+  if(power>=1.8){ this.mode='stagger'; this.fallTimer=0;
+    ['kneeL','kneeR'].forEach(function(kn){ J[kn].a=Math.min(J[kn].a,0.45); J[kn].v=0; }); }
 };
 Char.prototype.step=function(dt){
   var J=this.J, k;
@@ -128,7 +129,8 @@ Char.prototype.step=function(dt){
     J.bodyP.tgt=0.5; J.spineP.tgt=-0.35;
     J.raiseL.tgt=1.3+0.3*Math.sin(this.fallTimer*14);
     J.raiseR.tgt=1.3-0.3*Math.sin(this.fallTimer*14);
-    J.hipL.tgt=0.5; J.hipR.tgt=-0.4;
+    J.hipL.tgt=0.45; J.hipR.tgt=0.35;
+    J.kneeL.tgt=0.2; J.kneeR.tgt=0.2;
     if(this.fallTimer>1.3){ this.mode='idle'; this.timer=0; }
   }
   if(this.mode==='idle' && Math.abs(J.spineP.a)>0.38){
@@ -138,6 +140,9 @@ Char.prototype.step=function(dt){
   if(!walking) this.bob*=0.85;
   J.headP.tgt+=-0.75*J.spineP.a;
   for(k in J){ var j=J[k]; var acc=j.kp*(j.tgt-j.a)-j.kd*j.v; j.v+=acc*dt; j.a+=j.v*dt; }
+  var LIM={kneeL:[0,1.7],kneeR:[0,1.7],hipL:[-1.3,1.3],hipR:[-1.3,1.3],spineP:[-1.2,1.2],bodyP:[-1.2,1.2],spineR:[-1,1],bodyR:[-1,1]};
+  for(k in LIM){ var jj=J[k], lo=LIM[k][0], hi=LIM[k][1];
+    if(jj.a<lo){ jj.a=lo; jj.v=Math.max(0,jj.v); } else if(jj.a>hi){ jj.a=hi; jj.v=Math.min(0,jj.v); } }
 };
 Char.prototype.skeleton=function(){
   var J=this.J, ch=Math.cos(this.heading), sh=Math.sin(this.heading);
