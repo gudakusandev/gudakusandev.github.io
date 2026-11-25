@@ -75,7 +75,7 @@ function Joint(kp,kd){return {a:0,v:0,kp:kp,kd:kd,tgt:0};}
 function Char(){
   this.x=0; this.y=2; this.heading=0.6; this.phase=0; this.bob=0;
   this.mode='idle'; this.timer=0; this.fallTimer=0; this.target=null; this.auto=true;
-  this.J={ hipL:Joint(60,9), hipR:Joint(60,9), kneeL:Joint(70,9), kneeR:Joint(70,9),
+  this.J={ hipL:Joint(60,9), hipR:Joint(60,9), rollL:Joint(50,8), rollR:Joint(50,8), kneeL:Joint(70,9), kneeR:Joint(70,9),
     shL:Joint(45,8), shR:Joint(45,8), raiseL:Joint(45,8), raiseR:Joint(45,8),
     elbL:Joint(50,8), elbR:Joint(50,8), spineP:Joint(38,8), spineR:Joint(38,8),
     bodyP:Joint(26,7), bodyR:Joint(26,7), headP:Joint(50,9) };
@@ -140,7 +140,7 @@ Char.prototype.step=function(dt){
   if(!walking) this.bob*=0.85;
   J.headP.tgt+=-0.75*J.spineP.a;
   for(k in J){ var j=J[k]; var acc=j.kp*(j.tgt-j.a)-j.kd*j.v; j.v+=acc*dt; j.a+=j.v*dt; }
-  var LIM={kneeL:[0,1.7],kneeR:[0,1.7],hipL:[-1.3,1.3],hipR:[-1.3,1.3],spineP:[-1.2,1.2],bodyP:[-1.2,1.2],spineR:[-1,1],bodyR:[-1,1]};
+  var LIM={kneeL:[0,1.7],kneeR:[0,1.7],hipL:[-1.3,1.3],hipR:[-1.3,1.3],spineP:[-1.2,1.2],bodyP:[-1.2,1.2],spineR:[-1,1],bodyR:[-1,1],rollL:[-0.6,0.6],rollR:[-0.6,0.6]};
   for(k in LIM){ var jj=J[k], lo=LIM[k][0], hi=LIM[k][1];
     if(jj.a<lo){ jj.a=lo; jj.v=Math.max(0,jj.v); } else if(jj.a>hi){ jj.a=hi; jj.v=Math.min(0,jj.v); } }
 };
