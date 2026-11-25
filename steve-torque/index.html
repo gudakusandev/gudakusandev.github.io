@@ -126,7 +126,8 @@ Char.prototype.step=function(dt){
     if(this.timer>2.4){ this.mode='idle'; this.timer=0; }
   } else if(this.mode==='stagger'){
     this.fallTimer+=dt;
-    J.bodyP.tgt=0.5; J.spineP.tgt=-0.35;
+    J.bodyP.tgt=0.12; J.spineP.tgt=0.5; this.bob=-0.8;
+    J.rollL.tgt=0.28; J.rollR.tgt=-0.28;
     J.raiseL.tgt=1.3+0.3*Math.sin(this.fallTimer*14);
     J.raiseR.tgt=1.3-0.3*Math.sin(this.fallTimer*14);
     J.hipL.tgt=0.45; J.hipR.tgt=0.35;
@@ -152,11 +153,13 @@ Char.prototype.skeleton=function(){
   var legs={};
   [['L','hipL','kneeL'],['R','hipR','kneeR']].forEach(function(cfg){
     var sx=cfg[0]==='R'?HIPX:-HIPX;
-    var hipP=pt(sx,0,0,root), ha=J[cfg[1]].a;
-    var td=[F[0]*Math.sin(ha), F[1]*Math.sin(ha), -Math.cos(ha)];
+    var hipP=pt(sx,0,0,root), ha=J[cfg[1]].a, ra=J[cfg[0]==='L'?'rollL':'rollR'].a;
+    function legDir(ang){ var lx=-Math.cos(ang)*Math.sin(ra), ly=Math.sin(ang), lz=-Math.cos(ang)*Math.cos(ra);
+      return [R[0]*lx+F[0]*ly, R[1]*lx+F[1]*ly, lz]; }
+    var td=legDir(ha);
     var kneeP=[hipP[0]+td[0]*THIGH, hipP[1]+td[1]*THIGH, hipP[2]+td[2]*THIGH];
     var sa=ha-J[cfg[2]].a;
-    var sd=[F[0]*Math.sin(sa), F[1]*Math.sin(sa), -Math.cos(sa)];
+    var sd=legDir(sa);
     var footP=[kneeP[0]+sd[0]*SHIN, kneeP[1]+sd[1]*SHIN, kneeP[2]+sd[2]*SHIN];
     legs[cfg[0]]=[hipP,kneeP,footP];
   });
