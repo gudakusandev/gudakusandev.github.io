@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>実験 #003 箱型キャラ×トルクPD ― スタッキングで生き物を動かす</title><style>:root{--hatch-widget-text:#f1f3f5;--hatch-widget-muted:#adb5bd;--hatch-widget-border:#3a4152;--hatch-widget-surface:#171f30;--hatch-widget-surface-muted:#1d2639;--hatch-widget-accent:#ffd94d;--hatch-widget-on-accent:#191104}body{background:#101623;margin:0;padding:18px 14px 28px;font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;color:#eef2f7}.hd{max-width:720px;margin:0 auto 12px}.hd h1{font-size:20px;margin:0 0 6px}.hd p{color:#9fb0c3;font-size:13px;line-height:1.7;margin:0}.back{max-width:720px;margin:14px auto 0;font-size:13px}.back a{color:#ffd94d}</style></head><body>
+<div class="hd"><h1>実験 #003 箱型キャラ×トルクPD ― スタッキングで生き物を動かす</h1><p>頭・胴・腕・脚が全部「矩形断面スライスの積み重ね」。全関節をトルクPDサーボ（目標角度へトルクをかける制御）で駆動し、キーフレームなしで立って歩いてよろける。描画はZバッファ＋逆写像ラスタライズ。</p></div>
+<div id="st3Root" style="font-family:system-ui,-apple-system,'Hiragino Sans',sans-serif;color:var(--hatch-widget-text);max-width:720px;margin:0 auto">
+<style>
+  #st3Root .st-wrap{background:var(--hatch-widget-surface);border:1px solid var(--hatch-widget-border);border-radius:14px;padding:14px}
+  #st3Root canvas{width:100%;height:auto;display:block;border-radius:10px;touch-action:none;cursor:grab;image-rendering:pixelated}
+  #st3Root .st-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+  #st3Root .st-btn{flex:1 1 18%;min-width:96px;padding:9px 4px;border-radius:10px;border:1px solid var(--hatch-widget-border);background:var(--hatch-widget-surface-muted);color:var(--hatch-widget-text);font-size:12.5px;font-weight:700;cursor:pointer}
+  #st3Root .st-btn.on{background:var(--hatch-widget-accent);color:var(--hatch-widget-on-accent);border-color:var(--hatch-widget-accent)}
+  #st3Root .st-note{font-size:12px;color:var(--hatch-widget-muted);line-height:1.7;margin-top:10px}
+</style>
+<div class="st-wrap">
+  <canvas id="st3Cv" width="680" height="460"></canvas>
+  <div class="st-row">
+    <button class="st-btn" id="st3Walk">歩く: ON</button>
+    <button class="st-btn" id="st3Wave">手を振る</button>
+    <button class="st-btn" id="st3Poke">押す</button>
+    <button class="st-btn" id="st3Push">強く押す</button>
+    <button class="st-btn" id="st3Rot">自動回転: ON</button>
+  </div>
+  <div class="st-note" id="st3Stat">状態: 待機</div>
+  <div class="st-note">実験 #003 ― スタッキング製の箱型キャラを「トルクPD制御」で動かす試作。全関節はキーフレームでなく、目標角度へトルクをかけるサーボで駆動。だから押せば物理でよろけ、踏ん張って一歩出る。描画はZバッファ＋逆写像ラスタライズで、モアレ状のドット抜けと前後関係の崩れを対策済み。島ごとドラッグで回転。</div>
+</div>
+<script>
+(function(){
+"use strict";
+var root=document.getElementById('st3Root');
+var cv=root.querySelector('#st3Cv'), ctx=cv.getContext('2d');
+var PW=136, PH=92, CX=68, CY=46, TILT=0.72;
+var img=ctx.createImageData(PW,PH), buf=new Uint32Array(img.data.buffer);
+var zb=new Float32Array(PW*PH);
+function C(h){var n=parseInt(h.slice(1),16);return (255<<24)|((n&255)<<16)|(((n>>8)&255)<<8)|((n>>16)&255);}
+var COL={
+  bg:C('#131f38'),
+  grass:[C('#1e6b34'),C('#2f9e4f'),C('#45c765'),C('#79e08f'),C('#b5f2c0')],
+  soil:[C('#4a2e17'),C('#6e4520'),C('#8f5e2b'),C('#b3813f'),C('#d9a960')],
+  shadow:C('#1e6b34'),
+  skin:C('#c8915f'), hair:C('#4a2f16'), shirt:C('#1b9e9e'), pants:C('#4040c8'),
+  shoe:C('#5a5a66'), ink:C('#20242c'), mouth:C('#a06a38')
+};
+function setD(x,y,depth,c){ if(x>=0&&x<PW&&y>=0&&y<PH){ var i=y*PW+x; if(depth>=zb[i]){ zb[i]=depth; buf[i]=c; } } }
+function rot2(x,y,a){var c=Math.cos(a),s=Math.sin(a);return [x*c-y*s, x*s+y*c];}
+function w2s(wx,wy,wz,th){var r=rot2(wx,wy,th);return [CX+r[0], CY+r[1]*TILT-wz, r[1]+TILT*wz];}
+
+/* 円盤スライス: 逆写像 (画面ピクセルごとにローカル座標を解く) */
+function disc(ox,oy,wz,r,ang,pal,base,spot,th){
+  var sc=rot2(ox,oy,th), ccx=CX+sc[0], ccy=CY+sc[1]*TILT-wz;
+  var x0=Math.max(0,Math.floor(ccx-r-1)), x1=Math.min(PW-1,Math.ceil(ccx+r+1));
+  var y0=Math.max(0,Math.floor(ccy-r*TILT-1)), y1=Math.min(PH-1,Math.ceil(ccy+r*TILT+1));
+  var edge=(r-0.95)*(r-0.95);
+  for(var sy=y0;sy<=y1;sy++)for(var sx=x0;sx<=x1;sx++){
+    var rx=sx-ccx, ry=(sy-ccy)/TILT;
+    var lp=rot2(rx,ry,-ang), lx=lp[0], ly=lp[1];
+    var d2=lx*lx+ly*ly; if(d2>r*r)continue;
+    var idx=base;
+    if(d2>edge) idx=base-1;
+    else if(spot){ var gx=lx-r*0.45, gy=ly+r*0.30; if(gx*gx+gy*gy<(r*0.32)*(r*0.32)) idx=base-1; }
+    setD(sx,sy, sc[1]+ry+TILT*wz, pal[Math.max(0,Math.min(4,idx))]);
+  }
+}
+function drawIsland(th){
+  for(var i=0;i<12;i++){ var z=i/11, r=37*(1-0.25*z*z);
+    disc(0,0, -(3+i*1.7), r, th, COL.soil, i%2?2:1, i%3===0, th); }
+  disc(0,0,0,37,th,COL.grass,2,true,th);
+  disc(0,0,0,30,th,COL.grass,2,true,th);
+}
+
+/* ===== キャラ ===== */
+var THIGH=4.2, SHIN=4.2, LEGW=3.0, HIPX=2.1;
+var TORSO_H=8.0, TORSO_W=7.2, TORSO_D=3.6;
+var UARM=3.8, FARM=3.6, ARMW=3.0;
+var HEAD_H=6.4, HEAD_W=6.4, NECK=0.7;
+function Joint(kp,kd){return {a:0,v:0,kp:kp,kd:kd,tgt:0};}
+function Char(){
+  this.x=0; this.y=2; this.heading=0.6; this.phase=0; this.bob=0;
+  this.mode='idle'; this.timer=0; this.fallTimer=0; this.target=null; this.auto=true;
+  this.J={ hipL:Joint(60,9), hipR:Joint(60,9), kneeL:Joint(70,9), kneeR:Joint(70,9),
+    shL:Joint(45,8), shR:Joint(45,8), raiseL:Joint(45,8), raiseR:Joint(45,8),
+    elbL:Joint(50,8), elbR:Joint(50,8), spineP:Joint(38,8), spineR:Joint(38,8),
+    bodyP:Joint(26,7), bodyR:Joint(26,7), headP:Joint(50,9) };
+}
+Char.prototype.poke=function(power){
+  if(this.mode==='stagger')return;
+  var J=this.J;
+  J.spineP.v+=2.4*power; J.bodyP.v+=1.1*power; J.raiseL.v+=2.0*power; J.raiseR.v-=2.0*power;
+  if(power>=1.8){ this.mode='stagger'; this.fallTimer=0; }
+};
+Char.prototype.step=function(dt){
+  var J=this.J, k;
+  this.timer+=dt;
+  for(k in J) J[k].tgt=0;
+  J.elbL.tgt=0.25; J.elbR.tgt=0.25;
+  var walking=false;
+  if(this.mode==='idle'){
+    J.spineP.tgt=0.03*Math.sin(this.timer*1.7);
+    J.shL.tgt=0.05*Math.sin(this.timer*1.7);
+    J.shR.tgt=-0.05*Math.sin(this.timer*1.7);
+    if(this.auto && this.timer>2.2){
+      this.mode='walk'; this.timer=0;
+      var ang=this.heading+2.2;
+      this.target=[24*Math.sin(ang), 24*Math.cos(ang)];
+    }
+  } else if(this.mode==='walk'){
+    var dx=this.target[0]-this.x, dy=this.target[1]-this.y;
+    var dist=Math.hypot(dx,dy), want=Math.atan2(dx,dy);
+    var dh=(want-this.heading+Math.PI*3)%(Math.PI*2)-Math.PI;
+    this.heading+=Math.max(-2.2*dt, Math.min(2.2*dt, dh*9*dt));
+    if(dist<3.0){ this.mode='idle'; this.timer=0; }
+    else{
+      walking=true;
+      var speed=5.4;
+      this.phase+=dt*6.4;
+      this.x+=Math.sin(this.heading)*speed*dt;
+      this.y+=Math.cos(this.heading)*speed*dt;
+      var p=this.phase;
+      J.hipL.tgt=0.62*Math.sin(p); J.hipR.tgt=0.62*Math.sin(p+Math.PI);
+      J.kneeL.tgt=1.05*Math.max(0,Math.sin(p-2.2)); J.kneeR.tgt=1.05*Math.max(0,Math.sin(p+Math.PI-2.2));
+      J.shL.tgt=-0.5*Math.sin(p); J.shR.tgt=0.5*Math.sin(p);
+      J.spineP.tgt=0.10;
+      this.bob=-0.45*Math.abs(Math.cos(p));
+    }
+  } else if(this.mode==='wave'){
+    J.raiseR.tgt=2.5; J.elbR.tgt=0.5+0.45*Math.sin(this.timer*9); J.headP.tgt=-0.08;
+    if(this.timer>2.4){ this.mode='idle'; this.timer=0; }
+  } else if(this.mode==='stagger'){
+    this.fallTimer+=dt;
+    J.bodyP.tgt=0.5; J.spineP.tgt=-0.35;
+    J.raiseL.tgt=1.3+0.3*Math.sin(this.fallTimer*14);
+    J.raiseR.tgt=1.3-0.3*Math.sin(this.fallTimer*14);
+    J.hipL.tgt=0.5; J.hipR.tgt=-0.4;
+    if(this.fallTimer>1.3){ this.mode='idle'; this.timer=0; }
+  }
+  if(this.mode==='idle' && Math.abs(J.spineP.a)>0.38){
+    this.mode='walk'; this.timer=0;
+    this.target=[this.x+9*Math.sin(this.heading), this.y+9*Math.cos(this.heading)];
+  }
+  if(!walking) this.bob*=0.85;
+  J.headP.tgt+=-0.75*J.spineP.a;
+  for(k in J){ var j=J[k]; var acc=j.kp*(j.tgt-j.a)-j.kd*j.v; j.v+=acc*dt; j.a+=j.v*dt; }
+};
+Char.prototype.skeleton=function(){
+  var J=this.J, ch=Math.cos(this.heading), sh=Math.sin(this.heading);
+  var R=[ch,sh], F=[-sh,ch], self=this;
+  function pt(lx,ly,lz,base){return [base[0]+R[0]*lx+F[0]*ly, base[1]+R[1]*lx+F[1]*ly, base[2]+lz];}
+  var root=[this.x, this.y, THIGH+SHIN+this.bob];
+  var legs={};
+  [['L','hipL','kneeL'],['R','hipR','kneeR']].forEach(function(cfg){
+    var sx=cfg[0]==='R'?HIPX:-HIPX;
+    var hipP=pt(sx,0,0,root), ha=J[cfg[1]].a;
+    var td=[F[0]*Math.sin(ha), F[1]*Math.sin(ha), -Math.cos(ha)];
+    var kneeP=[hipP[0]+td[0]*THIGH, hipP[1]+td[1]*THIGH, hipP[2]+td[2]*THIGH];
+    var sa=ha-J[cfg[2]].a;
+    var sd=[F[0]*Math.sin(sa), F[1]*Math.sin(sa), -Math.cos(sa)];
+    var footP=[kneeP[0]+sd[0]*SHIN, kneeP[1]+sd[1]*SHIN, kneeP[2]+sd[2]*SHIN];
+    legs[cfg[0]]=[hipP,kneeP,footP];
+  });
+  var sp=J.spineP.a, sr=J.spineR.a;
+  function upPt(lx,ly,lz){
+    var x1=lx*Math.cos(sr)+lz*Math.sin(sr), z1=-lx*Math.sin(sr)+lz*Math.cos(sr);
+    var y2=ly*Math.cos(sp)-z1*Math.sin(sp), z2=ly*Math.sin(sp)+z1*Math.cos(sp);
+    return pt(x1,y2,z2,root);
+  }
+  function upDir(lx,ly,lz){
+    var x1=lx*Math.cos(sr)+lz*Math.sin(sr), z1=-lx*Math.sin(sr)+lz*Math.cos(sr);
+    var y2=ly*Math.cos(sp)-z1*Math.sin(sp), z2=ly*Math.sin(sp)+z1*Math.cos(sp);
+    return [R[0]*x1+F[0]*y2, R[1]*x1+F[1]*y2, z2];
+  }
+  var torsoBase=upPt(0,0,0.2), torsoTop=upPt(0,0,TORSO_H), neckP=upPt(0,0,TORSO_H+NECK);
+  var arms={};
+  [['L','shL','raiseL','elbL'],['R','shR','raiseR','elbR']].forEach(function(cfg){
+    var side=cfg[0], sgn=side==='R'?1:-1;
+    var sx=(TORSO_W/2+ARMW/2-0.3)*sgn;
+    var shP=upPt(sx,0,TORSO_H-0.8);
+    var sa=J[cfg[1]].a, ra=J[cfg[2]].a, ea=J[cfg[3]].a;
+    function armDir(swing,rz,elbow){
+      var a=swing+elbow, vx=0, vy=Math.sin(a), vz=-Math.cos(a), b=-sgn*rz;
+      var wx=vx*Math.cos(b)+vz*Math.sin(b), wz=-vx*Math.sin(b)+vz*Math.cos(b);
+      return upDir(wx,vy,wz);
+    }
+    var d1=armDir(sa,ra,0);
+    var elP=[shP[0]+d1[0]*UARM, shP[1]+d1[1]*UARM, shP[2]+d1[2]*UARM];
+    var d2=armDir(sa,ra,ea);
+    var handP=[elP[0]+d2[0]*FARM, elP[1]+d2[1]*FARM, elP[2]+d2[2]*FARM];
+    arms[side]=[shP,elP,handP];
+  });
+  var bp=J.bodyP.a, br=J.bodyR.a;
+  function bodyTf(p){
+    var lx=(p[0]-self.x)*ch+(p[1]-self.y)*sh, ly=-(p[0]-self.x)*sh+(p[1]-self.y)*ch, lz=p[2];
+    var x1=lx*Math.cos(br)+lz*Math.sin(br), z1=-lx*Math.sin(br)+lz*Math.cos(br);
+    var y2=ly*Math.cos(bp)-z1*Math.sin(bp), z2=ly*Math.sin(bp)+z1*Math.cos(bp);
+    return [self.x+R[0]*x1+F[0]*y2, self.y+R[1]*x1+F[1]*y2, z2];
+  }
+  var out={legs:{},arms:{},fwd:F};
+  ['L','R'].forEach(function(s){ out.legs[s]=legs[s].map(bodyTf); out.arms[s]=arms[s].map(bodyTf); });
+  out.torso=[bodyTf(torsoBase), bodyTf(torsoTop)];
+  out.neck=bodyTf(neckP);
+  out.headUp=upDir(0,0,1);
+  out.rightU=upDir(1,0,0);
+  out.fwdU=upDir(0,1,0);
+  return out;
+};
+
+/* ===== 部品描画: 逆写像 + Zバッファ ===== */
+function drawPart(p0,p1,w,d,color,th,faceFn,frame){
+  var dx=p1[0]-p0[0], dy=p1[1]-p0[1], dz=p1[2]-p0[2];
+  var L=Math.sqrt(dx*dx+dy*dy+dz*dz); if(L<0.01)return;
+  var dir=[dx/L,dy/L,dz/L];
+  var R3, F3;
+  if(frame){ R3=frame[0]; F3=frame[1]; }
+  else{
+    var rx=dir[1], ry=-dir[0], rz=0, rl=Math.sqrt(rx*rx+ry*ry+rz*rz);
+    if(rl<0.2){ rx=1; ry=0; rz=0; } else { rx/=rl; ry/=rl; rz/=rl; }
+    R3=[rx,ry,rz];
+    F3=[ry*dir[2]-rz*dir[1], rz*dir[0]-rx*dir[2], rx*dir[1]-ry*dir[0]];
+  }
+  var R2=rot2(R3[0],R3[1],th), F2=rot2(F3[0],F3[1],th);
+  var a=R2[0], b=F2[0], c=R2[1]*TILT-R3[2], dd=F2[1]*TILT-F3[2];
+  var det=a*dd-b*c; if(Math.abs(det)<1e-6)return;
+  var n=Math.max(2,Math.ceil(L/0.45)), hw=w/2+0.4, hd=d/2+0.4;
+  for(var s=0;s<n;s++){
+    var t=(s+0.5)/n;
+    var C3=[p0[0]+dx*t, p0[1]+dy*t, p0[2]+dz*t];
+    var Crot=rot2(C3[0],C3[1],th);
+    var xs=[], ys=[], ux, uy, q;
+    [-hw,hw].forEach(function(uxv){ [-hd,hd].forEach(function(uyv){
+      q=w2s(C3[0]+R3[0]*uxv+F3[0]*uyv, C3[1]+R3[1]*uxv+F3[1]*uyv, C3[2]+R3[2]*uxv+F3[2]*uyv, th);
+      xs.push(q[0]); ys.push(q[1]);
+    }); });
+    var x0=Math.max(0,Math.floor(Math.min.apply(null,xs))-1), x1=Math.min(PW-1,Math.ceil(Math.max.apply(null,xs))+1);
+    var y0=Math.max(0,Math.floor(Math.min.apply(null,ys))-1), y1=Math.min(PH-1,Math.ceil(Math.max.apply(null,ys))+1);
+    var e0x=Crot[0], e0y=Crot[1]*TILT-C3[2];
+    for(var sy=y0;sy<=y1;sy++)for(var sx=x0;sx<=x1;sx++){
+      var e1=sx-CX-e0x, e2=sy-CY-e0y;
+      var lx=(e1*dd-b*e2)/det, ly=(a*e2-e1*c)/det;
+      if(Math.abs(lx)>hw||Math.abs(ly)>hd)continue;
+      var wz=C3[2]+R3[2]*lx+F3[2]*ly;
+      var wyr=Crot[1]+R2[1]*lx+F2[1]*ly;
+      var col=color;
+      if(faceFn) col=faceFn(Math.round(lx), ly, s, n, col);
+      setD(sx,sy, wyr+TILT*wz, col);
+    }
+  }
+}
+function render(char,th){
+  var i; for(i=0;i<buf.length;i++){ buf[i]=COL.bg; zb[i]=-1e9; }
+  drawIsland(th);
+  var sk=char.skeleton();
+  disc(char.x,char.y,0.06,6.5,th,[COL.shadow,COL.shadow,COL.shadow,COL.shadow,COL.shadow],2,false,th);
+  ['L','R'].forEach(function(side){
+    var leg=sk.legs[side];
+    drawPart(leg[0],leg[1],LEGW,LEGW,COL.pants,th,null,null);
+    drawPart(leg[1],leg[2],LEGW,LEGW,COL.pants,th,null,null);
+    var shoeP=[leg[2][0]+sk.fwd[0]*1.2, leg[2][1]+sk.fwd[1]*1.2, Math.max(0.4,leg[2][2]-0.6)];
+    drawPart([leg[2][0],leg[2][1],leg[2][2]+0.7],shoeP,LEGW,LEGW,COL.shoe,th,null,null);
+    var arm=sk.arms[side];
+    drawPart(arm[0],arm[1],ARMW,ARMW,COL.shirt,th,null,null);
+    drawPart(arm[1],arm[2],ARMW,ARMW,COL.skin,th,null,null);
+  });
+  drawPart(sk.torso[0],sk.torso[1],TORSO_W,TORSO_D,COL.shirt,th,null,[sk.rightU,sk.fwdU]);
+  var hu=sk.headUp;
+  var headTop=[sk.neck[0]+hu[0]*HEAD_H, sk.neck[1]+hu[1]*HEAD_H, sk.neck[2]+hu[2]*HEAD_H];
+  drawPart(sk.neck,headTop,HEAD_W,HEAD_W,COL.skin,th,function(ilx,lyf,s,n,col){
+    if(s>=n-2) return COL.hair;
+    if(lyf>HEAD_W/2-1.2){
+      if(s>=n-3) return COL.hair;
+      if(s>=Math.floor(n*0.38) && s<=Math.floor(n*0.38)+3 && (Math.abs(ilx)===1||Math.abs(ilx)===2)) return COL.ink;
+      if(s>=Math.floor(n*0.16) && s<=Math.floor(n*0.16)+1 && Math.abs(ilx)<=1) return COL.mouth;
+      return COL.skin;
+    }
+    return s<n-3?COL.skin:COL.hair;
+  },[sk.rightU,sk.fwdU]);
+  var off=document.createElement('canvas'); off.width=PW; off.height=PH;
+  off.getContext('2d').putImageData(img,0,0);
+  ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(off,0,0,680,460);
+}
+
+/* ===== 操作・ループ ===== */
+var char=new Char(), theta=0, autoRot=true, dragging=false, lastX=0, vel=0;
+var stat=root.querySelector('#st3Stat');
+var MODE_JA={idle:'待機',walk:'歩行中',wave:'手を振っている',stagger:'よろけ中'};
+cv.addEventListener('pointerdown',function(e){dragging=true;lastX=e.clientX;cv.setPointerCapture(e.pointerId);});
+cv.addEventListener('pointermove',function(e){ if(!dragging)return; var dx=e.clientX-lastX; lastX=e.clientX; theta+=dx*0.008; vel=dx*0.008*60; });
+cv.addEventListener('pointerup',function(){dragging=false;});
+var bWalk=root.querySelector('#st3Walk'), bRot=root.querySelector('#st3Rot');
+bWalk.addEventListener('click',function(){ char.auto=!char.auto; if(!char.auto&&char.mode==='walk'){char.mode='idle';char.timer=0;} bWalk.textContent='歩く: '+(char.auto?'ON':'OFF'); bWalk.classList.toggle('on',char.auto); });
+bWalk.classList.add('on');
+root.querySelector('#st3Wave').addEventListener('click',function(){ if(char.mode!=='stagger'){char.mode='wave'; char.timer=0;} });
+root.querySelector('#st3Poke').addEventListener('click',function(){ char.poke(1.0); });
+root.querySelector('#st3Push').addEventListener('click',function(){ char.poke(2.2); });
+bRot.addEventListener('click',function(){ autoRot=!autoRot; bRot.textContent='自動回転: '+(autoRot?'ON':'OFF'); bRot.classList.toggle('on',autoRot); });
+bRot.classList.add('on');
+var last=performance.now();
+function frame(now){
+  var dt=Math.min(0.05,(now-last)/1000); last=now;
+  char.step(dt/2); char.step(dt/2);
+  if(!dragging){ theta+=vel*dt*0.016; vel*=0.92; if(autoRot) theta+=dt*0.25; }
+  render(char,theta);
+  stat.textContent='状態: '+(MODE_JA[char.mode]||char.mode)+' ／ 回転 '+Math.round(((theta*180/Math.PI)%360+360)%360)+'°';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</div>
+
+<div class="back"><a href="../">← 実験一覧へ戻る</a></div>
+</body></html>
