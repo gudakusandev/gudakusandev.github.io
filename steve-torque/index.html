@@ -83,7 +83,7 @@ function Char(){
 Char.prototype.poke=function(power){
   if(this.mode==='stagger')return;
   var J=this.J;
-  J.spineP.v+=2.4*power; J.bodyP.v+=1.1*power; J.raiseL.v+=2.0*power; J.raiseR.v-=2.0*power;
+  J.spineP.v+=2.4*power; J.bodyP.v+=1.1*power; J.raiseL.v+=2.0*power; J.raiseR.v+=2.0*power;
   if(power>=1.8){ this.mode='stagger'; this.fallTimer=0;
     ['kneeL','kneeR'].forEach(function(kn){ J[kn].a=Math.min(J[kn].a,0.45); J[kn].v=0; }); }
 };
