@@ -192,7 +192,7 @@ function drawSlime(){
     var shift=gauss(t,0.55,0.30)*attackAmt;
     var cxp=p.x+ox[i]*0.4+fx*shift, cyp=p.y+fy*shift;
     centers.push({x:cxp,y:cyp,r:r,t:t});
-    disc(cxp,cyp,r,theta,COL.slime,t<0.22?1:t<0.55?2:t<0.85?3:4,(t>0.25&&t<0.8),true);
+    disc(cxp,cyp,r,theta,COL.slime,t<0.22?1:t<0.55?2:t<0.85?3:4,false,true);
   }
   // 顔: 正面がこちらを向いている時だけ
   var vis=Math.cos(theta);
