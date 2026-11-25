@@ -1,5 +1,12 @@
 <!DOCTYPE html>
-<html lang="ja" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>実験 #003 箱型キャラ×トルクPD ― スタッキングで生き物を動かす</title><style>:root{--hatch-widget-text:#f1f3f5;--hatch-widget-muted:#adb5bd;--hatch-widget-border:#3a4152;--hatch-widget-surface:#171f30;--hatch-widget-surface-muted:#1d2639;--hatch-widget-accent:#ffd94d;--hatch-widget-on-accent:#191104}body{background:#101623;margin:0;padding:18px 14px 28px;font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;color:#eef2f7}.hd{max-width:720px;margin:0 auto 12px}.hd h1{font-size:20px;margin:0 0 6px}.hd p{color:#9fb0c3;font-size:13px;line-height:1.7;margin:0}.back{max-width:720px;margin:14px auto 0;font-size:13px}.back a{color:#ffd94d}</style></head><body>
+<html lang="ja" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>実験 #003 箱型キャラ×トルクPD ― スタッキングで生き物を動かす</title><style>:root{--hatch-widget-text:#f1f3f5;--hatch-widget-muted:#adb5bd;--hatch-widget-border:#3a4152;--hatch-widget-surface:#171f30;--hatch-widget-surface-muted:#1d2639;--hatch-widget-accent:#ffd94d;--hatch-widget-on-accent:#191104}body{background:#101623;margin:0;padding:18px 14px 28px;font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;color:#eef2f7}.hd{max-width:720px;margin:0 auto 12px}.hd h1{font-size:20px;margin:0 0 6px}.hd p{color:#9fb0c3;font-size:13px;line-height:1.7;margin:0}.back{max-width:720px;margin:14px auto 0;font-size:13px}.back a{color:#ffd94d}.algo{max-width:720px;margin:22px auto 0;background:#171f30;border:1px solid #3a4152;border-radius:14px;padding:18px 20px}
+.algo h2{font-size:17px;margin:0 0 10px;color:#ffd94d}
+.algo h3{font-size:14px;margin:16px 0 6px;color:#eef2f7}
+.algo p,.algo li{color:#c3cedd;font-size:13px;line-height:1.8}
+.algo ul{margin:4px 0 8px;padding-left:18px}
+.algo code{background:#1d2639;border:1px solid #3a4152;border-radius:5px;padding:0 5px;font-size:12px;color:#ffd94d}
+.algo .fig{background:#101623;border:1px solid #3a4152;border-radius:10px;padding:10px 12px;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;color:#9fb0c3;white-space:pre;overflow-x:auto}
+</style></head><body>
 <div class="hd"><h1>実験 #003 箱型キャラ×トルクPD ― スタッキングで生き物を動かす</h1><p>頭・胴・腕・脚が全部「矩形断面スライスの積み重ね」。全関節をトルクPDサーボ（目標角度へトルクをかける制御）で駆動し、キーフレームなしで立って歩いてよろける。描画はZバッファ＋逆写像ラスタライズ。</p></div>
 <div id="st3Root" style="font-family:system-ui,-apple-system,'Hiragino Sans',sans-serif;color:var(--hatch-widget-text);max-width:720px;margin:0 auto">
 <style>
@@ -322,6 +329,40 @@ function frame(now){
 requestAnimationFrame(frame);
 })();
 </script>
+</div>
+
+<div class="algo">
+  <h2>アルゴリズム詳細</h2>
+
+  <h3>1. 体の作り ― 矩形断面スライスのスタック</h3>
+  <p>頭・胴・腕・脚はすべて「薄い矩形スライスの積み重ね」でできている（スプライトスタッキング）。3Dモデルは使っていない。各パーツは骨格計算で得た始点→終点の軸に沿って、断面（例：頭 6.4×6.4、胴 7.2×3.6）を約0.45間隔で積む。顔の目や口は、頭のスライスのうち特定の高さ・正面位置にあるピクセルだけ色を変えて描いている。</p>
+
+  <h3>2. 動き ― 全関節トルクPDサーボ</h3>
+  <p>キーフレームアニメーションは使っていない。全17関節（股・膝・脚ロール・肩・肘・背骨・体幹・首）それぞれがPDサーボで、毎ステップ「トルク = kp×(目標角度 − 現在角度) − kd×角速度」を計算して角度を更新する。</p>
+  <div class="fig">torque = kp * (target - angle) - kd * velocity
+velocity += torque * dt
+angle    += velocity * dt</div>
+  <p>待機・歩行・手を振る・よろけは「目標角度の組」を切り替えているだけ。歩行は脚の振りと膝の屈伸、体の上下動を位相でずらした目標値の合成。「押す」は関節速度へのインパルスで、よろけ→踏ん張り（ステップ反射）は背骨の傾きが閾値を超えたら歩行バーストを発火させるルールで出している。</p>
+  <ul>
+    <li>関節可動域クランプ：膝は 0〜1.7 rad（後方にしか曲がらない）など、解剖学的にありえない角度を禁止。歩行中に押されても脚が反対側へ折れないのはこれのおかげ</li>
+    <li>頭の安定化：背骨が傾いた分だけ首を逆に傾け、顔がなるべく水平を向くよう補正</li>
+    <li>よろけ姿勢：全身を足元から倒すのではなく腰から折り、脚はロール関節で横にも開いて踏ん張る</li>
+  </ul>
+
+  <h3>3. 描画 ― Zバッファ＋逆写像ラスタライズ</h3>
+  <p>WebGLもcanvasの図形APIも使わず、136×92ピクセルのバッファに1ピクセルずつ色を置く。奥行きはZバッファ（深度 = 回転後の奥行き + 傾斜×高さ）で解決するので、パーツの前後関係は描く順序に依存しない。</p>
+  <p>各スライスの描画は逆写像：画面ピクセルごとに「スライスのローカル座標 (lx, ly)」を2×2の連立方程式で解き、範囲内ならそのピクセルを塗る。格子点を順に打つ前方描画だと回転時に格子とピクセルが干渉してモアレ状の穴が開くため、この方式にした。</p>
+  <div class="fig">[ lx ]     [ e1 ]
+[ ly ] = M⁻¹ [ e2 ]     (M はスライス基底の投影、det = その面積)</div>
+
+  <h3>4. ハマりどころ ― det ≈ 0 でスライスが散る</h3>
+  <p>開発中に「特定の角度でだけ上半身がドット状に散る」バグに悩まされた。原因は逆写像の行列式 det。det は「スライスが画面に映る面積」に相当し、腰折れで傾いた胴体・頭のスライス面がカメラの視線とほぼ平行になる相対角度（カメラ角度ではなく、カメラとキャラの向きの差）では det がほぼ 0 になる。割り算の分母が潰れるため座標が数十倍に増幅され、ピクセルが帯状に暴走していた（実測 det = −0.014）。</p>
+  <p>対策はハイブリッド化：|det| が小さいパーツだけ描画を反転し、スライス上の点を画面へ打っていく前方スプラットに切り替える。こちらには問題の割り算が無く、視線と平行なスライスは「細い線」として幾何学的に正しく描かれる。</p>
+  <ul>
+    <li>通常時：逆写像（精密・高速）</li>
+    <li>|det| &lt; 0.12 のパーツ：前方スプラット（暴走しない）</li>
+  </ul>
+  <p>島も同じ仕組みで、円盤スライスの積み重ね＋池と影の楕円でできている。</p>
 </div>
 
 <div class="back"><a href="../">← 実験一覧へ戻る</a></div>
