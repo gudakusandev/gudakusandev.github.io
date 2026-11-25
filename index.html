@@ -1,106 +1,39 @@
 <!DOCTYPE html>
-<html lang="ja" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>本物スプライトスタッキング</title><style>:root{--hatch-widget-text:#f1f3f5;--hatch-widget-muted:#adb5bd;--hatch-widget-border:#3a4152;--hatch-widget-surface:#1d2230;--hatch-widget-accent:#ffd94d}body{background:#12141d;margin:0;padding:14px}</style></head><body>
-<div id="ss1">
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gudakusandev ― ワンショット実験室</title>
 <style>
-#ss1{font-family:system-ui,sans-serif;color:var(--hatch-widget-text);box-sizing:border-box}
-#ss1 *{box-sizing:border-box}
-#ss1 .hd{font-size:15px;font-weight:700;margin:2px 0 2px}
-#ss1 .sub2{font-size:12px;color:var(--hatch-widget-muted);margin-bottom:8px}
-#ss1 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
-#ss1 button{padding:7px 13px;border:1px solid var(--hatch-widget-border);border-radius:9px;background:var(--hatch-widget-surface);color:var(--hatch-widget-text);cursor:pointer;font-size:13px}
-#ss1 button.on{border-color:var(--hatch-widget-accent);color:var(--hatch-widget-accent);font-weight:700}
-#ss1 label{font-size:12px;color:var(--hatch-widget-muted)}
-#ss1 input[type=range]{flex:1;min-width:120px}
-#ss1 #stat{font-size:13px}
-#ss1 #stat b{color:var(--hatch-widget-accent);font-size:17px}
-#ss1 canvas{width:100%;height:auto;display:block;border-radius:12px;border:1px solid var(--hatch-widget-border);touch-action:none;background:#0e1420}
+  :root{color-scheme:dark}
+  body{margin:0;background:#101623;color:#eef2f7;font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:36px 18px 56px}
+  h1{font-size:24px;margin:0 0 6px}
+  .lead{color:#9fb0c3;font-size:14px;line-height:1.7;margin:0 0 28px}
+  .card{display:block;text-decoration:none;color:inherit;background:#171f30;border:1px solid #2a3752;border-radius:14px;overflow:hidden;margin-bottom:16px}
+  .card img{width:100%;display:block;aspect-ratio:680/480;object-fit:cover;background:#0e1420}
+  .card .body{padding:14px 16px 16px}
+  .card h2{font-size:17px;margin:0 0 4px}
+  .tag{display:inline-block;font-size:11px;color:#ffd94d;border:1px solid #6b5a1e;border-radius:999px;padding:2px 9px;margin-bottom:8px}
+  .card p{margin:0;color:#9fb0c3;font-size:13px;line-height:1.7}
+  footer{color:#5f7189;font-size:12px;margin-top:32px}
 </style>
-<div class="hd">本物スプライトスタッキング ― ドット絵スライスを重ねて回す</div>
-<div class="sub2">各オブジェクトは「高さごとの断面ドット絵」を実際に重ねて描画している。ドラッグで回転、スライダーで層をバラバラに分解できる。</div>
-<div class="row" id="objs"></div>
-<canvas id="cv" width="680" height="480"></canvas>
-<div class="row"><label>層の間隔（分解）</label><input type="range" id="lift" min="1" max="9" step="0.5" value="2.5"></div>
-<div id="stat">回転 <b id="rot">0.0</b> 周 ／ スライス <b id="slices">0</b> 枚 ／ <span id="rpm">0 rpm</span></div>
-<script>
-(function(){
-"use strict";
-var $=function(id){return document.getElementById(id)};
-var cv=$('cv'),ctx=cv.getContext('2d'),W=680,H=480,TAU=Math.PI*2;
-var GW=48,GH=36,SCALE=7.2;
-function mkLayer(paint){var c=document.createElement('canvas');c.width=GW;c.height=GH;var g=c.getContext('2d');paint(g);return c}
-function px(g,x,y,w,h,col){g.fillStyle=col;g.fillRect(x|0,y|0,Math.ceil(w),Math.ceil(h))}
-function ell(g,cx,cy,rx,ry,col){g.fillStyle=col;for(var y=0;y<GH;y++)for(var x=0;x<GW;x++){var dx=(x-cx)/rx,dy=(y-cy)/ry;if(dx*dx+dy*dy<=1)g.fillRect(x,y,1,1)}}
-function shade(hex,f){var n=parseInt(hex.slice(1),16),r=(n>>16)&255,gg=(n>>8)&255,b=n&255;r=Math.min(255,Math.max(0,Math.round(r*f)));gg=Math.min(255,Math.max(0,Math.round(gg*f)));b=Math.min(255,Math.max(0,Math.round(b*f)));return 'rgb('+r+','+gg+','+b+')'}
+</head>
+<body>
+<div class="wrap">
+  <h1>ワンショット実験室</h1>
+  <p class="lead">開発界隈で流行っている技術を、実際に作って理解するための使い捨て実験置き場。各ページでそのまま遊べます。</p>
 
-/* ---- 車：16スライス ---- */
-function carLayers(){var L=[],i;
- var wheels=function(g,dark){px(g,7,6,11,6,dark);px(g,7,24,11,6,dark);px(g,30,6,11,6,dark);px(g,30,24,11,6,dark)};
- for(i=0;i<3;i++)(function(i){L.push(mkLayer(function(g){wheels(g,'#14141c');px(g,8,9,32,18,shade('#8f1d2c',0.75+i*0.1))}))})(i);
- for(i=0;i<5;i++)(function(i){L.push(mkLayer(function(g){wheels(g,'#1b1b24');px(g,6,9,36,18,'#c1122f');px(g,6,12,36,3,'#e5383b');px(g,40,10,3,5,'#ffe066');px(g,40,21,3,5,'#ffe066');px(g,6,16,36,1,'#8f1d2c')}))})(i);
- for(i=0;i<2;i++)L.push(mkLayer(function(g){px(g,6,9,36,18,'#a41623');px(g,13,11,19,14,'#5c0a14');px(g,3,8,3,20,'#5c0a14')}));
- for(i=0;i<3;i++)L.push(mkLayer(function(g){px(g,14,11,18,14,'#0b3d5c');px(g,15,12,16,12,'#48cae4');px(g,22,12,2,12,'#0b3d5c');px(g,15,17,16,1,'#90e0ef')}));
- for(i=0;i<2;i++)L.push(mkLayer(function(g){px(g,15,12,16,12,'#c1122f');px(g,15,12,16,3,'#e5383b')}));
- L.push(mkLayer(function(g){px(g,16,13,14,10,'#e5383b');px(g,16,13,14,2,'#ff8fa3')}));
- return L}
-/* ---- バーガー：11スライス ---- */
-function burgerLayers(){var L=[];
- L.push(mkLayer(function(g){ell(g,24,18,13,10,'#d98e32')}));
- L.push(mkLayer(function(g){ell(g,24,18,13.5,10.5,'#e8a94e');ell(g,24,18,11,8.5,'#f0b45a')}));
- L.push(mkLayer(function(g){ell(g,24,18,12.5,9.5,'#6b3a1f');ell(g,24,18,10,7.5,'#7d4525')}));
- L.push(mkLayer(function(g){ell(g,24,18,14.5,11,'#69db7c');ell(g,24,18,12,9,'#51cf66')}));
- L.push(mkLayer(function(g){ell(g,24,18,13,10,'#ffd94d');px(g,10,16,4,5,'#ffd94d');px(g,34,20,4,5,'#ffd94d');px(g,22,26,4,4,'#ffd94d')}));
- L.push(mkLayer(function(g){ell(g,24,18,11,8.5,'#e03131');ell(g,24,18,9,6.5,'#fa5252')}));
- L.push(mkLayer(function(g){ell(g,24,18,10,7.5,'#f8f9fa');ell(g,24,18,7,5,'#e9ecef')}));
- L.push(mkLayer(function(g){ell(g,24,18,12.5,9.5,'#f0b45a')}));
- L.push(mkLayer(function(g){ell(g,24,18,11,8.5,'#f5bc66')}));
- L.push(mkLayer(function(g){ell(g,24,18,9,7,'#f7c873')}));
- L.push(mkLayer(function(g){ell(g,24,18,7,5.4,'#f9d18a');px(g,20,15,2,1,'#fff3d6');px(g,26,20,2,1,'#fff3d6');px(g,23,17,2,1,'#fff3d6');px(g,18,20,2,1,'#fff3d6');px(g,28,15,2,1,'#fff3d6')}));
- return L}
-/* ---- 寿司：10スライス ---- */
-function sushiLayers(){var L=[],i;
- var rice=function(g,f){px(g,10,11,28,14,shade('#f1f3f5',f));px(g,10,11,28,2,shade('#dee2e6',f));px(g,13,15,2,2,shade('#ced4da',f));px(g,30,20,2,2,shade('#ced4da',f));px(g,22,13,2,2,shade('#ced4da',f))};
- for(i=0;i<4;i++)(function(i){L.push(mkLayer(function(g){rice(g,0.82+i*0.06)}))})(i);
- var salmon=function(g,base,stripe){px(g,9,10,30,16,base);px(g,9,10,30,3,stripe);px(g,14,13,3,12,stripe);px(g,22,12,3,13,stripe);px(g,30,13,3,12,stripe);px(g,9,23,30,3,shade('#e56b81',1))};
- for(i=0;i<4;i++)(function(i){L.push(mkLayer(function(g){salmon(g,'#ff8fa3','#ffd6dd')}))})(i);
- L.push(mkLayer(function(g){salmon(g,'#ff9fb0','#ffe0e6')}));
- L.push(mkLayer(function(g){px(g,10,11,28,14,'#ffa8bb');px(g,15,13,3,11,'#ffd6dd');px(g,23,12,3,12,'#ffd6dd');px(g,31,13,3,11,'#ffd6dd');px(g,40,20,4,4,'#51cf66')}));
- return L}
+  <a class="card" href="./sprite-stacking/">
+    <img src="./sprite-stacking/poster.png" alt="スプライトスタッキングのデモ画像">
+    <div class="body">
+      <span class="tag">Sprite Stacking</span>
+      <h2>実験 #001 スプライトスタッキング</h2>
+      <p>ドット絵を「高さごとの断面」で何枚も描き、全枚を同じ角度で回しながら少しずつ上にずらして重ねると、3Dモデルなしで立体に見える。ドラッグで回転、スライダーで分解もできる。</p>
+    </div>
+  </a>
 
-var OBJECTS=[{name:'スポーツカー',make:carLayers},{name:'バーガー',make:burgerLayers},{name:'サーモン寿司',make:sushiLayers}];
-var layers=null,curObj=0;
-var angle=0.6,vel=0.004,drag=false,lastX=0,totalRot=0,bounce=0,lift=2.5,parts=[],pops=[];
-var objsEl=$('objs');
-OBJECTS.forEach(function(o,i){var b=document.createElement('button');b.textContent=o.name;if(i===0)b.className='on';b.onclick=function(){curObj=i;layers=null;var bs=objsEl.children;for(var j=0;j<bs.length;j++)bs[j].className='';b.className='on'};objsEl.appendChild(b)});
-$('lift').addEventListener('input',function(e){lift=parseFloat(e.target.value)});
-function pos(e){var r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}}
-var downT=0,moved=0;
-cv.addEventListener('pointerdown',function(e){drag=true;moved=0;lastX=pos(e).x;downT=performance.now();try{cv.setPointerCapture(e.pointerId)}catch(_){}});
-cv.addEventListener('pointermove',function(e){if(!drag)return;var x=pos(e).x,dx=x-lastX;lastX=x;moved+=Math.abs(dx);var d=dx*0.012;angle+=d;totalRot+=Math.abs(d)/TAU;vel=d*0.9});
-cv.addEventListener('pointerup',function(e){drag=false;if(moved<6&&performance.now()-downT<300){bounce=1;for(var i=0;i<22;i++){var a=Math.random()*TAU,s=1+Math.random()*3.4;parts.push({x:340,y:300,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2,l:1,c:['#ffd94d','#ff8fa3','#69db7c','#4dabf7'][i%4]})}pops.push({t:['うまい!','かっこいい!','つやつや!','回せ回せ!'][Math.floor(Math.random()*4)],y:120,l:1})}});
-function frame(){requestAnimationFrame(frame);
- if(!layers){layers=OBJECTS[curObj].make();$('slices').textContent=layers.length}
- if(!drag){angle+=vel;totalRot+=Math.abs(vel)/TAU;vel*=0.97;if(Math.abs(vel)<0.004)vel=0.004}
- bounce*=0.94;
- var c=ctx;c.clearRect(0,0,W,H);
- var g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,'#131c2e');g.addColorStop(0.62,'#0e1420');g.addColorStop(0.63,'#1a2436');g.addColorStop(1,'#232f47');c.fillStyle=g;c.fillRect(0,0,W,H);
- c.strokeStyle='rgba(120,160,220,0.13)';c.lineWidth=1;for(var i=0;i<9;i++){c.beginPath();c.moveTo(0,302+i*i*2.4);c.lineTo(W,302+i*i*2.4);c.stroke()}
- for(var i=0;i<26;i++){c.fillStyle='rgba(255,255,255,'+(0.12+ (i%3)*0.08)+')';c.fillRect((i*173)%W,(i*61)%180,2,2)}
- var cx=340,baseY=318,bob=Math.sin(performance.now()*0.0016)*3;
- c.fillStyle='rgba(0,0,0,0.4)';c.beginPath();c.ellipse(cx,baseY+16,120,20,0,0,TAU);c.fill();
- c.save();c.translate(cx,baseY+bob);c.scale(1,0.86);
- var sq=1-bounce*0.12;c.scale(1+ bounce*0.1,sq);
- c.imageSmoothingEnabled=false;
- for(var li=0;li<layers.length;li++){c.save();c.translate(0,-li*lift - bounce*li*0.4);c.rotate(angle);c.drawImage(layers[li],-GW*SCALE/2,-GH*SCALE/2,GW*SCALE,GH*SCALE);c.restore()}
- c.restore();
- for(var i=parts.length-1;i>=0;i--){var p=parts[i];p.x+=p.vx;p.y+=p.vy;p.vy+=0.09;p.l-=0.016;if(p.l<=0){parts.splice(i,1);continue}c.globalAlpha=Math.max(0,p.l);c.fillStyle=p.c;c.beginPath();c.arc(p.x,p.y,3,0,TAU);c.fill()}c.globalAlpha=1;
- c.textAlign='center';
- for(var i=pops.length-1;i>=0;i--){var pp=pops[i];pp.y-=0.8;pp.l-=0.014;if(pp.l<=0){pops.splice(i,1);continue}c.globalAlpha=Math.max(0,pp.l);c.fillStyle='#ffd94d';c.font='bold 22px system-ui';c.fillText(pp.t,340,pp.y)}c.globalAlpha=1;
- $('rot').textContent=totalRot.toFixed(1);
- $('rpm').textContent=Math.round(Math.abs(vel)*60*60/TAU*10)/10+' rpm 相当';
-}
-requestAnimationFrame(frame);
-})();
-</script>
+  <footer>by gudakusandev ― 作ってようやく概念がわかる、を繰り返す場所</footer>
 </div>
-
-</body></html>
+</body>
+</html>
