@@ -333,6 +333,7 @@ requestAnimationFrame(frame);
 
 <div class="algo">
   <h2>アルゴリズム詳細</h2>
+  <video controls preload="metadata" poster="poster.png" src="steve-algo-post-v4.mp4" style="width:100%;border-radius:10px;margin:0 0 14px"></video>
 
   <h3>1. 体の作り ― 矩形断面スライスのスタック</h3>
   <p>頭・胴・腕・脚はすべて「薄い矩形スライスの積み重ね」でできている（スプライトスタッキング）。3Dモデルは使っていない。各パーツは骨格計算で得た始点→終点の軸に沿って、断面（例：頭 6.4×6.4、胴 7.2×3.6）を約0.45間隔で積む。顔の目や口は、頭のスライスのうち特定の高さ・正面位置にあるピクセルだけ色を変えて描いている。</p>
