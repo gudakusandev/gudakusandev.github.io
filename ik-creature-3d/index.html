@@ -40,7 +40,7 @@
 <div class="panel">
   <span class="tag">Procedural Animation / 3D IK</span>
   <h1>実験 #014 3D IKで歩く生き物</h1>
-  <p>夕景の小世界を、キーフレームなしで歩く四足の獣。脚は2ボーンIKで解き、着地点は「進む先＋地形の高さ」から手続き生成する。地面をタップするとそこへ歩いていく。</p>
+  <p>夕景の小世界を、キーフレームなしで歩く四足の獣。脚は2ボーンIKで解き、着地点は足場探索（一段で届く段差・傾斜・他の脚との間隔を判定して候補から選ぶ）で決める。階段・岩場・丸太橋の複雑地形コースを巡回し、地面をタップするとそこへ歩いていく。</p>
 </div>
 
 <div class="bar">
@@ -186,6 +186,145 @@ function groundNormal(x, z, out){
   return out;
 }
 
+/* ============================================================
+   複雑地形コース（台地・階段・段差ブロック・岩場・丸太橋）
+   接地クエリは「ベース地形＋各フィーチャーの最大値」で統合する
+============================================================ */
+const STEP_UP_MAX = 0.60;    // 一段で登れる段差
+const STEP_DOWN_MAX = 1.00;  // 一段で降りられる段差
+
+/* --- 台地と階段（階段下の地面を基準に台地の高さを決め、段差を均一にする） --- */
+const STAIR = { cx:-6, hw:1.3, steps:5, rise:0.27, depth:0.62, zEdge:-12 };
+const PLAT = { x0:-11, x1:-1, z0:-19, z1:-12, cx:-6, cz:-15.5 };
+PLAT.top = heightAt(STAIR.cx, -9.2) + STAIR.rise * STAIR.steps;
+function stairStepTop(k){ return PLAT.top - STAIR.rise * (STAIR.steps - k); }  // k=1（最下段）..5（最上段）
+function stairHeightAt(x, z){
+  if (Math.abs(x - STAIR.cx) > STAIR.hw) return -Infinity;
+  for (let k = 1; k <= STAIR.steps; k++){
+    const z0 = STAIR.zEdge + (STAIR.steps - k) * STAIR.depth;
+    if (z >= z0 && z < z0 + STAIR.depth) return stairStepTop(k);
+  }
+  return -Infinity;
+}
+/* --- 段差ブロック（台地の東側の降り口、2段） --- */
+const BLOCKS = [
+  { x0:-1.0, x1:0.3, z0:-17.2, z1:-15.2, top: PLAT.top - 0.45 },
+  { x0: 0.3, x1:1.6, z0:-17.2, z1:-15.2, top: PLAT.top - 0.90 }
+];
+/* --- 丸太橋と両岸（浅い窪みの両側に土手、間に丸太） --- */
+const BANK = { z0:8.0, z1:12.4, w:{ x0:-19.5, x1:-15.6 }, e:{ x0:-11.4, x1:-7.5 } };
+const bankTop = heightAt(-13.5, 10.2) + 0.52;
+const LOG = { z:10.2, x0:-16.6, x1:-10.4, R:0.30 };
+LOG.axisY = bankTop - 0.08;   // 丸太の上面は岸より +0.22
+function logHeightAt(x, z){
+  if (x < LOG.x0 || x > LOG.x1) return -Infinity;
+  const dz = Math.abs(z - LOG.z);
+  if (dz >= LOG.R) return -Infinity;
+  return LOG.axisY + Math.sqrt(LOG.R * LOG.R - dz * dz);
+}
+/* --- 岩場（半球近似の岩。乗る／跨ぐ対象） --- */
+const FIELD_ROCKS = [
+  { x:10.5, z:-6.0, r:0.80, h:0.34 },
+  { x:12.3, z:-4.2, r:0.62, h:0.26 },
+  { x:13.8, z:-6.5, r:0.95, h:0.44 },
+  { x:15.2, z:-3.4, r:0.70, h:0.30 },
+  { x:12.8, z:-1.2, r:0.58, h:0.22 },
+  { x:16.5, z:-5.6, r:0.85, h:0.38 },
+  { x:14.6, z: 0.6, r:0.66, h:0.28 }
+];
+for (const r of FIELD_ROCKS) r.base = heightAt(r.x, r.z);
+function fieldRockHeightAt(x, z){
+  let h = -Infinity;
+  for (const r of FIELD_ROCKS){
+    const dx = x - r.x, dz = z - r.z;
+    const d2 = dx*dx + dz*dz;
+    if (d2 < r.r * r.r) h = Math.max(h, r.base + r.h * Math.sqrt(1 - d2 / (r.r * r.r)));
+  }
+  return h;
+}
+/* --- 統合クエリ：脚の接地・体の高さ・タップ解決はすべてこれを使う --- */
+function surfaceHeightAt(x, z){
+  let h = heightAt(x, z);
+  if (x >= PLAT.x0 && x <= PLAT.x1 && z >= PLAT.z0 && z <= PLAT.z1) h = Math.max(h, PLAT.top);
+  h = Math.max(h, stairHeightAt(x, z));
+  for (const b of BLOCKS)
+    if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) h = Math.max(h, b.top);
+  if (z >= BANK.z0 && z <= BANK.z1){
+    if (x >= BANK.w.x0 && x <= BANK.w.x1) h = Math.max(h, bankTop);
+    if (x >= BANK.e.x0 && x <= BANK.e.x1) h = Math.max(h, bankTop);
+  }
+  h = Math.max(h, logHeightAt(x, z));
+  h = Math.max(h, fieldRockHeightAt(x, z));
+  return h;
+}
+const _sn = new THREE.Vector3();
+function surfaceNormal(x, z, out){
+  const e = 0.10;   /* 丸太のような細い足場でも上面を「平坦」と判定できる刻み */
+  const hx = surfaceHeightAt(x + e, z) - surfaceHeightAt(x - e, z);
+  const hz = surfaceHeightAt(x, z + e) - surfaceHeightAt(x, z - e);
+  out.set(-hx / (2 * e), 1, -hz / (2 * e)).normalize();
+  return out;
+}
+function onLog(x, z){
+  if (x < LOG.x0 + 0.2 || x > LOG.x1 - 0.2 || Math.abs(z - LOG.z) >= LOG.R + 0.18) return false;
+  return Math.abs(surfaceHeightAt(x, z) - logHeightAt(x, z)) < 0.02;
+}
+/* 構造物の占有エリア（植生・装飾の配置回避用） */
+function inStructureArea(x, z, m){
+  m = m || 0;
+  if (x > PLAT.x0 - m && x < PLAT.x1 + m && z > PLAT.z0 - m && z < PLAT.z1 + m) return true;
+  if (Math.abs(x - STAIR.cx) < STAIR.hw + m && z > STAIR.zEdge - m && z < STAIR.zEdge + STAIR.steps * STAIR.depth + m) return true;
+  for (const b of BLOCKS)
+    if (x > b.x0 - m && x < b.x1 + m && z > b.z0 - m && z < b.z1 + m) return true;
+  if (z > BANK.z0 - m && z < BANK.z1 + m && x > BANK.w.x0 - m && x < BANK.e.x1 + m) return true;
+  return false;
+}
+function inRockField(x, z, m){
+  return Math.hypot(x - 13.8, z + 3.4) < 5.6 + (m || 0);
+}
+
+/* ============================================================
+   足場探索：予測ホーム周辺の候補から「届く・滑らない・
+   他の脚と重ならない」着地点を選ぶ
+============================================================ */
+const FOOT_OFFSETS = [
+  [0, 0], [0.2, 0], [-0.2, 0], [0, 0.2], [0, -0.2],
+  [0.38, 0], [-0.38, 0], [0, 0.38], [0, -0.38],
+  [0.27, 0.27], [-0.27, 0.27], [0.27, -0.27], [-0.27, -0.27]
+];
+const MIN_NORMAL_Y = 0.60;   // これより急な面には足を置かない
+const FOOT_CLEARANCE = 0.30; // 他の脚の着地点との最小間隔
+function findFoothold(leg, out){
+  leg.candidates.length = 0;
+  let bestScore = Infinity, bestCand = null;
+  let leastRise = Infinity, fallback = null;
+  for (const [ox, oz] of FOOT_OFFSETS){
+    const cx = leg.home.x + ox, cz = leg.home.z + oz;
+    const cy = surfaceHeightAt(cx, cz);
+    surfaceNormal(cx, cz, _sn);
+    const rise = cy - leg.footPos.y;
+    let ok = _sn.y >= MIN_NORMAL_Y && rise <= STEP_UP_MAX && rise >= -STEP_DOWN_MAX;
+    if (ok){
+      for (const o of legs){
+        if (o === leg) continue;
+        const tx = o.stepping ? o.to.x : o.footPos.x;
+        const tz = o.stepping ? o.to.z : o.footPos.z;
+        if (Math.hypot(cx - tx, cz - tz) < FOOT_CLEARANCE){ ok = false; break; }
+      }
+    }
+    const cand = { x: cx, y: cy, z: cz, ok, chosen: false };
+    leg.candidates.push(cand);
+    if (Math.abs(rise) < leastRise){ leastRise = Math.abs(rise); fallback = cand; }
+    if (ok){
+      const score = Math.hypot(ox, oz) + Math.max(0, rise) * 0.45;
+      if (score < bestScore){ bestScore = score; out.set(cx, cy, cz); bestCand = cand; }
+    }
+  }
+  if (bestCand) bestCand.chosen = true;
+  else if (fallback){ out.set(fallback.x, fallback.y, fallback.z); fallback.chosen = true; }
+  return out;
+}
+
 {
   const SIZE = 150, SEG = 150;
   const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
@@ -258,14 +397,25 @@ function makeTree(x, z, s){
   treePositions.push(new THREE.Vector3(x, y, z));
 }
 for (let i = 0; i < 26; i++){
-  const a = rand(rng) * Math.PI * 2;
-  const r = 7 + rand(rng) * (WORLD_R - 6);
-  makeTree(Math.cos(a)*r, Math.sin(a)*r, 0.8 + rand(rng)*0.9);
+  let x = 0, z = 0;
+  for (let tries = 0; tries < 8; tries++){
+    const a = rand(rng) * Math.PI * 2;
+    const r = 7 + rand(rng) * (WORLD_R - 6);
+    x = Math.cos(a)*r; z = Math.sin(a)*r;
+    if (!inStructureArea(x, z, 1.4) && !inRockField(x, z, 0.6)) break;
+  }
+  if (inStructureArea(x, z, 1.4) || inRockField(x, z, 0.6)) continue;
+  makeTree(x, z, 0.8 + rand(rng)*0.9);
 }
 for (let i = 0; i < 15; i++){
-  const a = rand(rng) * Math.PI * 2;
-  const r = 4 + rand(rng) * (WORLD_R - 2);
-  const x = Math.cos(a)*r, z = Math.sin(a)*r;
+  let x = 0, z = 0, placed = false;
+  for (let tries = 0; tries < 8; tries++){
+    const a = rand(rng) * Math.PI * 2;
+    const r = 4 + rand(rng) * (WORLD_R - 2);
+    x = Math.cos(a)*r; z = Math.sin(a)*r;
+    if (!inStructureArea(x, z, 0.9) && !inRockField(x, z, 0.4)){ placed = true; break; }
+  }
+  if (!placed) continue;
   const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.3 + rand(rng)*0.55, 0), rockMat);
   rock.position.set(x, heightAt(x, z) + 0.08, z);
   rock.rotation.set(rand(rng)*3, rand(rng)*3, rand(rng)*3);
@@ -282,12 +432,16 @@ for (let i = 0; i < 15; i++){
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
   const p = new THREE.Vector3(), e = new THREE.Euler();
   for (let i = 0; i < N; i++){
-    const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R + 2);
-    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    let x = 0, z = 0, ok = false;
+    for (let tries = 0; tries < 6; tries++){
+      const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R + 2);
+      x = Math.cos(a)*r; z = Math.sin(a)*r;
+      if (!inStructureArea(x, z, 0.15)){ ok = true; break; }
+    }
     p.set(x, heightAt(x, z) + 0.13, z);
     e.set((rand(rng)-0.5)*0.35, rand(rng)*Math.PI, (rand(rng)-0.5)*0.35);
     q.setFromEuler(e);
-    const s = 0.7 + rand(rng)*1.1;
+    const s = ok ? 0.7 + rand(rng)*1.1 : 0.0001;
     sc.set(s, s*(0.8 + rand(rng)*0.7), s);
     m.compose(p, q, sc);
     tuft.setMatrixAt(i, m);
@@ -304,9 +458,14 @@ for (let i = 0; i < 15; i++){
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(1,1,1);
   const p = new THREE.Vector3();
   for (let i = 0; i < N; i++){
-    const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R - 2);
-    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    let x = 0, z = 0, ok = false;
+    for (let tries = 0; tries < 6; tries++){
+      const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R - 2);
+      x = Math.cos(a)*r; z = Math.sin(a)*r;
+      if (!inStructureArea(x, z, 0.15)){ ok = true; break; }
+    }
     p.set(x, heightAt(x, z) + 0.10 + rand(rng)*0.08, z);
+    sc.setScalar(ok ? 1 : 0.0001);
     m.compose(p, q, sc);
     flower.setMatrixAt(i, m);
     const col = palette[Math.floor(rand(rng) * palette.length)];
@@ -345,6 +504,78 @@ let fireflies, fireflyBase;
 }
 
 /* ============================================================
+   コース地形のメッシュ（高さ関数と一致させる）
+============================================================ */
+const stoneMat  = new THREE.MeshStandardMaterial({ color:0x9a8d7a, roughness:1, flatShading:true });
+const stoneMat2 = new THREE.MeshStandardMaterial({ color:0x877c6e, roughness:1, flatShading:true });
+const dirtMat   = new THREE.MeshStandardMaterial({ color:0x7d6248, roughness:1 });
+function addBox(cx, cz, w, d, top, depth, mat){
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, depth, d), mat);
+  mesh.position.set(cx, top - depth / 2, cz);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+/* 台地（岩の台） */
+addBox((PLAT.x0 + PLAT.x1) / 2, (PLAT.z0 + PLAT.z1) / 2,
+  PLAT.x1 - PLAT.x0, PLAT.z1 - PLAT.z0, PLAT.top, 4.5, stoneMat2);
+/* 階段（段ごとに箱） */
+for (let k = 1; k <= STAIR.steps; k++){
+  const z0 = STAIR.zEdge + (STAIR.steps - k) * STAIR.depth;
+  addBox(STAIR.cx, z0 + STAIR.depth / 2, STAIR.hw * 2, STAIR.depth,
+    stairStepTop(k), 3.0, k % 2 ? stoneMat : stoneMat2);
+}
+/* 段差ブロック */
+for (const b of BLOCKS)
+  addBox((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, b.x1 - b.x0, b.z1 - b.z0, b.top, 3.0, stoneMat);
+/* 両岸（土手） */
+addBox((BANK.w.x0 + BANK.w.x1) / 2, (BANK.z0 + BANK.z1) / 2,
+  BANK.w.x1 - BANK.w.x0, BANK.z1 - BANK.z0, bankTop, 2.6, dirtMat);
+addBox((BANK.e.x0 + BANK.e.x1) / 2, (BANK.z0 + BANK.z1) / 2,
+  BANK.e.x1 - BANK.e.x0, BANK.z1 - BANK.z0, bankTop, 2.6, dirtMat);
+/* 丸太 */
+{
+  const log = new THREE.Mesh(
+    new THREE.CylinderGeometry(LOG.R, LOG.R, LOG.x1 - LOG.x0, 14), trunkMat);
+  log.rotation.z = Math.PI / 2;
+  log.position.set((LOG.x0 + LOG.x1) / 2, LOG.axisY, LOG.z);
+  log.castShadow = true; log.receiveShadow = true;
+  scene.add(log);
+  const endMat = new THREE.MeshStandardMaterial({ color:0xd9b98c, roughness:1 });
+  for (const ex of [LOG.x0, LOG.x1]){
+    const cap = new THREE.Mesh(new THREE.CircleGeometry(LOG.R * 0.96, 14), endMat);
+    cap.position.set(ex + (ex === LOG.x0 ? -0.006 : 0.006), LOG.axisY, LOG.z);
+    cap.rotation.y = ex === LOG.x0 ? -Math.PI / 2 : Math.PI / 2;
+    scene.add(cap);
+  }
+}
+/* 岩場の岩（半球近似メッシュ：球を潰して高さ関数に合わせる） */
+for (const r of FIELD_ROCKS){
+  const rock = new THREE.Mesh(new THREE.SphereGeometry(r.r, 12, 9), rockMat);
+  rock.scale.y = r.h / r.r;
+  rock.position.set(r.x, r.base, r.z);
+  rock.rotation.y = (r.x * 7.3 + r.z * 3.1) % (Math.PI * 2);
+  rock.castShadow = true; rock.receiveShadow = true;
+  scene.add(rock);
+}
+/* 台地の上の草（統合高さで配置） */
+{
+  const tuftGeo = new THREE.ConeGeometry(0.09, 0.34, 5);
+  const tuftMat = new THREE.MeshStandardMaterial({ color:0x59854c, roughness:1 });
+  for (let i = 0; i < 14; i++){
+    const x = PLAT.x0 + 0.7 + rand(rng) * (PLAT.x1 - PLAT.x0 - 1.4);
+    const z = PLAT.z0 + 0.7 + rand(rng) * (PLAT.z1 - PLAT.z0 - 1.4);
+    if (Math.abs(x - STAIR.cx) < 1.6 && z > PLAT.z1 - 1.2) continue;
+    const tuft = new THREE.Mesh(tuftGeo, tuftMat);
+    tuft.position.set(x, surfaceHeightAt(x, z) + 0.13, z);
+    tuft.rotation.set((rand(rng)-0.5)*0.3, rand(rng)*Math.PI, (rand(rng)-0.5)*0.3);
+    const s = 0.8 + rand(rng);
+    tuft.scale.set(s, s, s);
+    scene.add(tuft);
+  }
+}
+
+/* ============================================================
    生き物（四足獣）
 ============================================================ */
 const furMat   = new THREE.MeshStandardMaterial({ color:0xf2e7d3, roughness:0.95 });
@@ -360,13 +591,14 @@ const creature = {
   heading: 0.6,
   speed: 0,
   gaitPhase: 0,
-  state: 'idle',
-  stateTime: 1.2,
-  target: new THREE.Vector3(6, 0, 4),
+  state: 'tour',
+  stateTime: 0,
+  tourIndex: 0,
+  target: new THREE.Vector3(-6, 0, -10.6),
   glance: 0, glanceTarget: 0, glanceTime: 2,
   earFlick: 0, earFlickTime: 3
 };
-creature.pos.y = heightAt(0, 0);
+creature.pos.y = surfaceHeightAt(0, 0);
 
 const body = new THREE.Group();
 scene.add(body);
@@ -461,6 +693,8 @@ for (const def of legDefs){
     upper, lower, kneeMesh: knee, footMesh: foot,
     footPos: new THREE.Vector3(),
     home: new THREE.Vector3(),
+    chosen: new THREE.Vector3(),
+    candidates: [],
     stepping: false, stepT: 0, stepDur: 0.26,
     from: new THREE.Vector3(), to: new THREE.Vector3(),
     kneePos: new THREE.Vector3()
@@ -474,7 +708,8 @@ for (const def of legDefs){
     leg.footPos.copy(creature.pos)
       .addScaledVector(right, leg.hip.x)
       .addScaledVector(fwd, leg.hip.z);
-    leg.footPos.y = heightAt(leg.footPos.x, leg.footPos.z);
+    leg.footPos.y = surfaceHeightAt(leg.footPos.x, leg.footPos.z);
+    leg.chosen.copy(leg.footPos);
   }
 }
 
@@ -515,6 +750,16 @@ for (let i = 0; i < 4; i++){
   t.rotation.x = -Math.PI/2; t.renderOrder = 100;
   skelGroup.add(t); targetMeshes.push(t);
 }
+/* 足場探索の候補点（骨格表示時：合格=シアン／不合格=灰／選択=リング側で表示） */
+const candPos = new Float32Array(4 * FOOT_OFFSETS.length * 3);
+const candCol = new Float32Array(4 * FOOT_OFFSETS.length * 3);
+const candGeo = new THREE.BufferGeometry();
+candGeo.setAttribute('position', new THREE.BufferAttribute(candPos, 3));
+candGeo.setAttribute('color', new THREE.BufferAttribute(candCol, 3));
+const candPoints = new THREE.Points(candGeo, new THREE.PointsMaterial({
+  size: 0.08, vertexColors: true, depthTest: false, transparent: true, opacity: 0.95 }));
+candPoints.renderOrder = 100;
+skelGroup.add(candPoints);
 document.getElementById('skelBtn').addEventListener('click', (ev) => {
   skelGroup.visible = !skelGroup.visible;
   ev.currentTarget.classList.toggle('on', skelGroup.visible);
@@ -564,18 +809,18 @@ function pickGround(clientX, clientY){
   ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
   const o = raycaster.ray.origin, d = raycaster.ray.direction;
-  let t = 0, prevT = 0, prevDiff = o.y - heightAt(o.x, o.z);
+  let t = 0, prevT = 0, prevDiff = o.y - surfaceHeightAt(o.x, o.z);
   const p = new THREE.Vector3();
-  for (let i = 0; i < 220; i++){
-    t += 0.35;
+  for (let i = 0; i < 420; i++){
+    t += 0.2;
     p.copy(o).addScaledVector(d, t);
-    const diff = p.y - heightAt(p.x, p.z);
+    const diff = p.y - surfaceHeightAt(p.x, p.z);
     if (diff <= 0 && prevDiff > 0){
       let lo = prevT, hi = t;
       for (let k = 0; k < 14; k++){
         const mid = (lo + hi) / 2;
         p.copy(o).addScaledVector(d, mid);
-        if (p.y - heightAt(p.x, p.z) > 0) lo = mid; else hi = mid;
+        if (p.y - surfaceHeightAt(p.x, p.z) > 0) lo = mid; else hi = mid;
       }
       p.copy(o).addScaledVector(d, (lo + hi) / 2);
       return p;
@@ -648,7 +893,7 @@ ring.rotation.x = -Math.PI/2;
 scene.add(ring);
 let ringTime = 99;
 function showTargetRing(p){
-  ring.position.set(p.x, heightAt(p.x, p.z) + 0.06, p.z);
+  ring.position.set(p.x, surfaceHeightAt(p.x, p.z) + 0.06, p.z);
   ringTime = 0;
 }
 
@@ -659,44 +904,96 @@ const _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _hipW = new THRE
 const _e = new THREE.Euler();
 function damp(cur, target, lambda, dt){ return THREE.MathUtils.damp(cur, target, lambda, dt); }
 
-function pickWanderTarget(){
-  const a = Math.random() * Math.PI * 2;
-  const r = 4 + Math.random() * (WORLD_R - 7);
-  creature.target.set(Math.cos(a) * r, 0, Math.sin(a) * r);
-  /* 木の幹は避ける */
-  for (const tp of treePositions){
-    if (creature.target.distanceTo(tp) < 1.6){
-      creature.target.x += 2.2; creature.target.z += 1.4;
-    }
+/* コース巡回ウェイポイント：階段→台地→段差ブロック→岩場→丸太橋→戻る */
+const TOUR = [
+  { x:-6.0,  z:-10.6, dwell:0   },  // 階段下
+  { x:-6.0,  z:-13.4, dwell:0   },  // 階段を登り切る
+  { x:-6.0,  z:-16.6, dwell:1.8 },  // 台地上
+  { x:-0.35, z:-16.2, dwell:0   },  // 段差ブロック1
+  { x: 0.95, z:-16.2, dwell:0   },  // 段差ブロック2
+  { x: 3.4,  z:-14.6, dwell:0   },  // 地面へ降りる
+  { x: 9.6,  z:-8.0,  dwell:0   },  // 岩場へ
+  { x: 13.6, z:-3.6,  dwell:1.4 },  // 岩場中央
+  { x: 12.4, z: 2.6,  dwell:0   },  // 岩場を抜ける
+  { x: 2.0,  z: 7.6,  dwell:0   },  // 南へ
+  { x:-16.8, z: 13.4, dwell:0   },  // 丸太橋・西岸の南の登り口（西岸は南側だけ段差が緩い）
+  { x:-17.4, z: 10.2, dwell:0   },  // 丸太橋・西岸
+  { x:-13.5, z: 10.2, dwell:0   },  // 丸太の中央
+  { x: -9.6, z: 10.2, dwell:1.4 },  // 東岸
+  { x: -3.0, z: 5.0,  dwell:0   },  // 戻り
+  { x:  0.0, z: 0.5,  dwell:1.2 }   // スタート付近
+];
+function nearestTourIndex(){
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < TOUR.length; i++){
+    const d = Math.hypot(TOUR[i].x - creature.pos.x, TOUR[i].z - creature.pos.z);
+    if (d < bestD){ bestD = d; best = i; }
   }
+  return (best + 1) % TOUR.length;   // 最寄りの「次」から再開する
 }
 
 let perfT = 0;
 function perfNow(){ return perfT; }
 
 function updateCreature(dt, t){
-  /* --- AI --- */
+  /* --- AI（コース巡回が基本動作。タップ移動が割り込み、終われば巡回再開） --- */
   creature.stateTime += dt;
+  if (creature.state === 'tour'){
+    const wp = TOUR[creature.tourIndex];
+    creature.target.set(wp.x, 0, wp.z);
+  }
   const toTarget = _fwd.copy(creature.target).sub(creature.pos); toTarget.y = 0;
+  /* 丸太の上では目標を丸太の軸上に寄せ、進路が谷へ逸れないようにする */
+  if (onLog(creature.pos.x, creature.pos.z)) toTarget.z = LOG.z - creature.pos.z;
   const distT = toTarget.length();
   let desiredSpeed = 0;
   if (creature.state === 'idle'){
-    if (creature.stateTime > 1.4 + (creature.seedIdle || 0)){
-      pickWanderTarget();
-      creature.state = 'walk'; creature.stateTime = 0;
+    if (creature.stateTime > 1.1 + (creature.seedIdle || 0)){
+      creature.state = 'tour'; creature.stateTime = 0;
     }
-  } else if (creature.state === 'walk'){
-    if (distT < 0.55){
+  } else { /* walk / tour */
+    const arriveR = creature.state === 'tour' ? 0.62 : 0.55;
+    if (distT < arriveR){
+      if (creature.state === 'tour'){
+        creature.seedIdle = TOUR[creature.tourIndex].dwell || 0;
+        creature.tourIndex = (creature.tourIndex + 1) % TOUR.length;
+      } else {
+        creature.tourIndex = nearestTourIndex();
+        creature.seedIdle = Math.random() * 1.6;
+      }
       creature.state = 'idle'; creature.stateTime = 0;
-      creature.seedIdle = Math.random() * 2.4;
+    } else if (creature.stateTime > 14){
+      /* 詰まり救済：その目標は諦めて巡回に戻る */
+      if (creature.state === 'tour') creature.tourIndex = (creature.tourIndex + 1) % TOUR.length;
+      else creature.tourIndex = nearestTourIndex();
+      creature.state = 'idle'; creature.stateTime = 0; creature.seedIdle = 0.4;
     } else {
-      desiredSpeed = distT < 1.6 ? 0.85 : 2.1;
+      desiredSpeed = distT < 1.6 ? 0.9 : 2.1;
     }
   }
-  /* --- 旋回と前進 --- */
+  /* 木の幹との簡易コリジョン（めり込まない） */
+  for (const tp of treePositions){
+    const dx = creature.pos.x - tp.x, dz = creature.pos.z - tp.z;
+    const d2 = dx*dx + dz*dz;
+    if (d2 < 0.55 * 0.55 && d2 > 1e-6){
+      const d = Math.sqrt(d2);
+      creature.pos.x = tp.x + dx / d * 0.55;
+      creature.pos.z = tp.z + dz / d * 0.55;
+    }
+  }
+  /* --- 旋回と前進（登れない段差は避けて回る） --- */
   let turnRate = 0;
-  if (desiredSpeed > 0 && distT > 0.05){
-    const targetHeading = Math.atan2(toTarget.x, toTarget.z);
+  if (creature.state !== 'idle' && distT > 0.05){
+    let targetHeading = Math.atan2(toTarget.x, toTarget.z);
+    const curH = surfaceHeightAt(creature.pos.x, creature.pos.z);
+    let blocked = true;
+    for (const off of [0, 0.55, -0.55, 1.1, -1.1, 1.75, -1.75]){
+      const h = targetHeading + off;
+      const ah = surfaceHeightAt(
+        creature.pos.x + Math.sin(h) * 1.25, creature.pos.z + Math.cos(h) * 1.25);
+      if (ah - curH <= STEP_UP_MAX && ah - curH >= -1.2){ targetHeading = h; blocked = false; break; }
+    }
+    if (blocked) desiredSpeed = 0;   /* どの方向も無理なら止まって向きだけ変える */
     let diff = targetHeading - creature.heading;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
@@ -715,16 +1012,15 @@ function updateCreature(dt, t){
   creature.gaitPhase += dt * (2.2 + creature.speed * 2.6) * (creature.speed > 0.03 ? 1 : 0.25);
 
   /* --- 体の姿勢 --- */
-  groundNormal(creature.pos.x, creature.pos.z, _n);
   const bob = Math.sin(creature.gaitPhase * 2) * 0.028 * Math.min(1, creature.speed);
-  const groundY = heightAt(creature.pos.x, creature.pos.z);
+  const groundY = surfaceHeightAt(creature.pos.x, creature.pos.z);
   const targetY = groundY + STAND_H + bob;
   creature.pos.y = damp(creature.pos.y, targetY, 9, dt);
   body.position.copy(creature.pos);
-  const slopeF = (heightAt(creature.pos.x + fwdX * 0.9, creature.pos.z + fwdZ * 0.9)
-                - heightAt(creature.pos.x - fwdX * 0.9, creature.pos.z - fwdZ * 0.9)) / 1.8;
-  const slopeR = (heightAt(creature.pos.x + fwdZ * 0.9, creature.pos.z - fwdX * 0.9)
-                - heightAt(creature.pos.x - fwdZ * 0.9, creature.pos.z + fwdX * 0.9)) / 1.8;
+  const slopeF = (surfaceHeightAt(creature.pos.x + fwdX * 0.9, creature.pos.z + fwdZ * 0.9)
+                - surfaceHeightAt(creature.pos.x - fwdX * 0.9, creature.pos.z - fwdZ * 0.9)) / 1.8;
+  const slopeR = (surfaceHeightAt(creature.pos.x + fwdZ * 0.9, creature.pos.z - fwdX * 0.9)
+                - surfaceHeightAt(creature.pos.x - fwdZ * 0.9, creature.pos.z + fwdX * 0.9)) / 1.8;
   const pitch = -Math.atan(slopeF) * 0.72;
   const roll  =  Math.atan(slopeR) * 0.72 + Math.sin(creature.gaitPhase) * 0.02 * Math.min(1, creature.speed);
   _e.set(
@@ -764,21 +1060,22 @@ function updateCreature(dt, t){
       .addScaledVector(_right, leg.hip.x * 1.06)
       .addScaledVector(_fwd, leg.hip.z + creature.speed * 0.24)
       .addScaledVector(_right, turnRate * (leg.front ? 0.10 : -0.06));
-    leg.home.y = heightAt(leg.home.x, leg.home.z);
+    leg.home.y = surfaceHeightAt(leg.home.x, leg.home.z);
+    findFoothold(leg, leg.chosen);   /* 足場探索で実際の着地点を決める */
   }
   const threshold = 0.34 + creature.speed * 0.13;
   for (let pair = 0; pair < 2; pair++){
     const pairLegs = legs.filter(l => l.pair === pair);
     const otherLegs = legs.filter(l => l.pair !== pair);
     const anyStepping = pairLegs.some(l => l.stepping);
-    const need = Math.max(...pairLegs.map(l => l.footPos.distanceTo(l.home)));
+    const need = Math.max(...pairLegs.map(l => l.footPos.distanceTo(l.chosen)));
     const otherBusy = otherLegs.some(l => l.stepping);
     if (!anyStepping && need > threshold && (!otherBusy || need > threshold * 1.9)){
       for (const leg of pairLegs){
         leg.stepping = true;
         leg.stepT = 0;
         leg.from.copy(leg.footPos);
-        leg.to.copy(leg.home);
+        leg.to.copy(leg.chosen);
         leg.stepDur = THREE.MathUtils.clamp(leg.from.distanceTo(leg.to) / (2.4 + creature.speed * 1.6), 0.15, 0.38);
       }
     }
@@ -793,7 +1090,7 @@ function updateCreature(dt, t){
         + Math.sin(k * Math.PI) * (0.16 + creature.speed * 0.05);
       if (k >= 1){ leg.stepping = false; leg.footPos.copy(leg.to); }
     } else {
-      leg.footPos.y = heightAt(leg.footPos.x, leg.footPos.z);
+      leg.footPos.y = surfaceHeightAt(leg.footPos.x, leg.footPos.z);
     }
   }
   /* --- IK でメッシュ配置 --- */
@@ -841,8 +1138,19 @@ function updateCreature(dt, t){
       jointMeshes[ji++].position.copy(leg.footPos);
     }
     legs.forEach((leg, i) => {
-      targetMeshes[i].position.copy(leg.home).y += 0.05;
+      targetMeshes[i].position.copy(leg.chosen).y += 0.05;
     });
+    /* 足場探索の候補点：合格=シアン、不合格=灰、選択済み=明るいピンク */
+    legs.forEach((leg, li) => {
+      leg.candidates.forEach((c, ci) => {
+        const i3 = (li * FOOT_OFFSETS.length + ci) * 3;
+        candPos[i3] = c.x; candPos[i3 + 1] = c.y + 0.04; candPos[i3 + 2] = c.z;
+        const col = c.chosen ? [1.0, 0.55, 0.65] : c.ok ? [0.45, 0.95, 1.0] : [0.32, 0.32, 0.38];
+        candCol[i3] = col[0]; candCol[i3 + 1] = col[1]; candCol[i3 + 2] = col[2];
+      });
+    });
+    candGeo.attributes.position.needsUpdate = true;
+    candGeo.attributes.color.needsUpdate = true;
   }
 }
 
@@ -862,7 +1170,7 @@ function updateCamera(dt){
   const cx = camTarget.x + Math.sin(camAz) * Math.cos(camEl) * camDist;
   const cz = camTarget.z + Math.cos(camAz) * Math.cos(camEl) * camDist;
   const cy = camTarget.y + Math.sin(camEl) * camDist;
-  camera.position.set(cx, Math.max(cy, heightAt(cx, cz) + 0.7), cz);
+  camera.position.set(cx, Math.max(cy, surfaceHeightAt(cx, cz) + 0.7), cz);
   camera.lookAt(camTarget);
 }
 
@@ -887,7 +1195,7 @@ function animate(){
       const ph = fireflyBase[i*4+2], sp = fireflyBase[i*4+3];
       const x = bx + Math.sin(t * 0.24 * sp + ph) * 1.6;
       const z = bz + Math.cos(t * 0.19 * sp + ph * 1.7) * 1.6;
-      const y = heightAt(x, z) + 0.7 + Math.sin(t * 0.6 * sp + ph * 2.3) * 0.45 + 0.4;
+      const y = surfaceHeightAt(x, z) + 0.7 + Math.sin(t * 0.6 * sp + ph * 2.3) * 0.45 + 0.4;
       posAttr.setXYZ(i, x, y, z);
     }
     posAttr.needsUpdate = true;
