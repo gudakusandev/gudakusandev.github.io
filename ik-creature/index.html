@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>実験 #013 IKで歩く生き物 ― プロシージャルアニメーション</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;padding:0;height:100%;background:#0b1026;overflow:hidden}
+  body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;color:#eef2f7}
+  #cv{display:block;width:100vw;height:100vh;touch-action:none}
+  .hud{position:fixed;left:14px;top:12px;z-index:5;pointer-events:none}
+  .hud h1{font-size:15px;margin:0 0 2px;font-weight:600;letter-spacing:.02em}
+  .hud p{margin:0;font-size:11.5px;color:#9fb0c3;line-height:1.6}
+  .panel{position:fixed;right:12px;top:12px;z-index:6;display:flex;gap:8px}
+  .panel button{pointer-events:auto;background:#171f30;color:#eef2f7;border:1px solid #2a3752;
+    border-radius:999px;padding:7px 14px;font-size:12.5px;cursor:pointer}
+  .panel button.on{background:#ffd94d;color:#191c26;border-color:#ffd94d;font-weight:600}
+  .hint{position:fixed;left:14px;bottom:12px;z-index:5;font-size:11.5px;color:#7e93ad;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div class="hud">
+  <h1>実験 #013 IKで歩く生き物</h1>
+  <p>キーフレームなし。2ボーンIK＋着地点の手続き生成だけで歩く四足のトカゲ。</p>
+</div>
+<div class="panel">
+  <button id="skelBtn" type="button">骨格表示</button>
+</div>
+<div class="hint">近づくと寄ってくる／タップすると驚いて逃げる</div>
+
+<script>
+'use strict';
+/* ============================================================
+   IK creature — procedural quadruped
+   - 2-bone analytic IK legs (thigh + shin)
+   - procedural stepping: each foot has a "home" (predicted foothold);
+     when the foot drifts too far from home it steps in an arc.
+   - diagonal gait groups (trot): FL+BR / FR+BL alternate.
+   - spine chain body, Verlet tail, terrain-snapped footholds.
+   ============================================================ */
+const VW = 1280, VH = 720;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let DPR = 1, viewScale = 1, viewOX = 0, viewOY = 0;
+
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width  = Math.floor(window.innerWidth  * DPR);
+  cv.height = Math.floor(window.innerHeight * DPR);
+  viewScale = Math.min(cv.width / VW, cv.height / VH);
+  viewOX = (cv.width  - VW * viewScale) / 2;
+  viewOY = (cv.height - VH * viewScale) / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------------- terrain ----------------
+   Base rolling hills + rectangular mesa blocks.
+   groundY(x) returns the surface height (smaller y = higher). */
+const BLOCKS = [
+  { x0: 168, x1: 336, top: 486 },
+  { x0: 884, x1: 1064, top: 452 },
+  { x0: 1120, x1: 1210, top: 540 }
+];
+function baseGround(x){
+  return 566
+    + Math.sin(x * 0.0040) * 26
+    + Math.sin(x * 0.0113 + 1.7) * 10
+    + Math.sin(x * 0.0270 + 0.4) * 4;
+}
+function groundY(x){
+  let y = baseGround(x);
+  for (const b of BLOCKS){
+    if (x >= b.x0 && x <= b.x1 && b.top < y) y = b.top;
+  }
+  return y;
+}
+
+/* decorations (precomputed) */
+const stars = [];
+for (let i = 0; i < 110; i++) stars.push({ x: Math.random()*VW, y: Math.random()*300, r: Math.random()*1.4+0.4, p: Math.random()*6.28 });
+const tufts = [];
+for (let x = 14; x < VW; x += 18 + Math.random()*26) tufts.push({ x, s: 0.7 + Math.random()*0.7, p: Math.random()*6.28 });
+const speckles = [];
+for (let i = 0; i < 130; i++){ const x = Math.random()*VW; speckles.push({ x, dy: 8 + Math.random()*70, r: 1 + Math.random()*2.2 }); }
+
+/* ---------------- creature ---------------- */
+const L1 = 47, L2 = 47;              // thigh / shin lengths
+const BODY_H = 72;                   // hip height above support surface
+const creature = {
+  x: 620, y: groundY(620) - BODY_H,
+  vx: 0, vy: 0,
+  facing: 1,
+  tilt: 0,
+  walkPhase: 0,
+  airborne: false,
+  mode: 'wander',                    // wander | seek | dash
+  modeT: 2.0,
+  idleLook: 0,
+  blink: 0, blinkT: 2.4,
+  startleCool: 0
+};
+
+/* spine: offsets along body axis (head +66 .. rear -66) */
+const SPINE = [66, 34, 0, -34, -62];
+const SPINE_R = [13.5, 20, 22.5, 19, 11];
+
+/* legs: end(front/back) x side(near/far); diagonal groups for trot */
+function makeLeg(end, side, group){
+  const hipOff = end === 'front' ? 46 : -46;
+  const hx = creature.x + hipOff, hy = creature.y + 8;
+  const fx = hx, fy = groundY(hx);
+  return {
+    end, side, group, hipOff,
+    bend: end === 'front' ? 1 : -1,      // front knees bend back, hind knees bend forward
+    fx, fy,                              // current foot position
+    stepping: false, stepT: 0, stepDur: 0.16,
+    fromX: fx, fromY: fy, toX: fx, toY: fy, stepH: 16,
+    homeX: fx, homeY: fy,
+    kneeX: hx, kneeY: hy + 40
+  };
+}
+const legs = [
+  makeLeg('front', 'far',  1),
+  makeLeg('back',  'far',  0),
+  makeLeg('front', 'near', 0),
+  makeLeg('back',  'near', 1)
+];
+
+/* tail: Verlet chain pinned to rear spine point */
+const TAIL_N = 7, TAIL_SEG = 15;
+const tail = [];
+for (let i = 0; i < TAIL_N; i++) tail.push({ x: creature.x - 62 - i * TAIL_SEG, y: creature.y + 4, px: 0, py: 0 });
+tail.forEach(p => { p.px = p.x; p.py = p.y; });
+
+/* pointer */
+const pointer = { x: -9999, y: -9999, active: false, down: false };
+
+function toVirtual(e){
+  const r = cv.getBoundingClientRect();
+  const cx = (e.clientX - r.left) * DPR, cy = (e.clientY - r.top) * DPR;
+  return { x: (cx - viewOX) / viewScale, y: (cy - viewOY) / viewScale };
+}
+cv.addEventListener('pointermove', e => { const p = toVirtual(e); pointer.x = p.x; pointer.y = p.y; pointer.active = true; });
+cv.addEventListener('pointerdown', e => {
+  const p = toVirtual(e); pointer.x = p.x; pointer.y = p.y; pointer.active = true; pointer.down = true;
+  startle(p.x, p.y);
+});
+window.addEventListener('pointerup', () => { pointer.down = false; });
+cv.addEventListener('pointerleave', () => { pointer.active = false; });
+
+function startle(px, py){
+  if (creature.startleCool > 0) return;
+  const d = Math.hypot(px - creature.x, py - creature.y);
+  if (d > 300) return;
+  creature.startleCool = 0.9;
+  creature.airborne = true;
+  creature.vy = -560;
+  creature.facing = (px < creature.x) ? 1 : -1;   // dash away from the tap
+  creature.mode = 'dash';
+  creature.modeT = 1.15;
+}
+
+/* ---------------- IK ---------------- */
+function solveIK(hx, hy, fx, fy, bendSign){
+  let dx = fx - hx, dy = fy - hy;
+  let d = Math.hypot(dx, dy);
+  const maxD = (L1 + L2) * 0.999, minD = Math.abs(L1 - L2) + 2;
+  if (d > maxD){ dx *= maxD / d; dy *= maxD / d; d = maxD; }
+  else if (d < minD){ const s = minD / Math.max(d, 1e-4); dx *= s; dy *= s; d = minD; }
+  fx = hx + dx; fy = hy + dy;
+  const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+  const ux = dx / d, uy = dy / d;
+  // perpendicular, oriented so the knee pushes toward bendSign * facing horizontally
+  const kx = hx + ux * a + (-uy) * h * bendSign;
+  const ky = hy + uy * a + ( ux) * h * bendSign;
+  return { kx, ky, fx, fy };
+}
+
+function hipPos(leg){
+  const c = Math.cos(creature.tilt), s = Math.sin(creature.tilt);
+  const lx = leg.hipOff * creature.facing, ly = 10;
+  return { x: creature.x + lx * c - ly * s, y: creature.y + lx * s + ly * c };
+}
+
+/* ---------------- simulation ---------------- */
+let simTime = 0;
+function step(dt){
+  simTime += dt;
+  const C = creature;
+  C.startleCool = Math.max(0, C.startleCool - dt);
+  C.blinkT -= dt;
+  if (C.blinkT < -0.12) C.blinkT = 1.6 + Math.random() * 2.6;
+  C.blink = C.blinkT < 0 ? 1 : 0;
+
+  /* --- behaviour --- */
+  C.modeT -= dt;
+  const pdx = pointer.x - C.x, pdy = pointer.y - C.y;
+  const pDist = Math.hypot(pdx, pdy);
+  let targetSpeed = 0;
+  if (C.mode === 'dash'){
+    targetSpeed = C.facing * 300;
+    if (C.modeT <= 0){ C.mode = 'wander'; C.modeT = 1 + Math.random() * 2; }
+  } else if (pointer.active && pDist < 300 && pDist > 46){
+    C.mode = 'seek';
+    C.facing = pdx >= 0 ? 1 : -1;
+    targetSpeed = C.facing * Math.min(150, 40 + pDist * 0.55);
+  } else {
+    if (C.mode !== 'wander'){ C.mode = 'wander'; C.modeT = 1 + Math.random() * 2.5; }
+    if (C.modeT <= 0){
+      C.modeT = 1.4 + Math.random() * 2.8;
+      C.idleLook = Math.random();
+      if (Math.random() < 0.3) C.facing = -C.facing;
+    }
+    targetSpeed = (C.idleLook < 0.62) ? C.facing * 74 : 0;
+  }
+  if (C.x < 90 && C.facing < 0){ C.facing = 1; if (C.mode === 'wander') targetSpeed = 74; }
+  if (C.x > VW - 90 && C.facing > 0){ C.facing = -1; if (C.mode === 'wander') targetSpeed = -74; }
+
+  const accel = C.airborne ? 1.2 : 7.5;
+  C.vx += (targetSpeed - C.vx) * Math.min(1, accel * dt);
+  C.x += C.vx * dt;
+  C.x = Math.max(50, Math.min(VW - 50, C.x));
+  const speedN = Math.min(1, Math.abs(C.vx) / 130);
+  C.walkPhase += dt * (2.2 + Math.abs(C.vx) * 0.055);
+
+  /* --- support height & body y --- */
+  let supSum = 0;
+  for (const leg of legs){
+    const hip = hipPos(leg);
+    leg.homeX = hip.x + Math.max(-38, Math.min(38, C.vx * 0.30));
+    leg.homeY = groundY(leg.homeX);
+    supSum += leg.stepping ? leg.toY : leg.fy;
+  }
+  const supportY = supSum / legs.length;
+  const restY = supportY - BODY_H + Math.sin(C.walkPhase * 2) * 2.4 * speedN;
+  if (C.airborne){
+    C.vy += 1650 * dt;
+    C.y += C.vy * dt;
+    if (C.y >= restY && C.vy > 0){ C.y = restY; C.vy = 0; C.airborne = false; }
+  } else {
+    C.y += (restY - C.y) * Math.min(1, 11 * dt);
+  }
+
+  /* --- tilt from front/back support (nose follows the slope) --- */
+  const fGY = groundY(C.x + 52 * C.facing), bGY = groundY(C.x - 52 * C.facing);
+  const tiltTarget = Math.max(-0.32, Math.min(0.32,
+    C.facing > 0 ? Math.atan2(fGY - bGY, 104) : Math.atan2(bGY - fGY, 104)));
+  C.tilt += (tiltTarget - C.tilt) * Math.min(1, 6 * dt);
+
+  /* --- legs: stepping --- */
+  const groupStepping = [false, false];
+  for (const leg of legs) if (leg.stepping) groupStepping[leg.group] = true;
+  for (const leg of legs){
+    const hip = hipPos(leg);
+    if (leg.stepping){
+      leg.stepT += dt / leg.stepDur;
+      const t = Math.min(1, leg.stepT);
+      const ease = t * t * (3 - 2 * t);
+      leg.fx = leg.fromX + (leg.toX - leg.fromX) * ease;
+      leg.fy = leg.fromY + (leg.toY - leg.fromY) * ease - Math.sin(t * Math.PI) * leg.stepH;
+      if (t >= 1){ leg.stepping = false; leg.fx = leg.toX; leg.fy = leg.toY; }
+    } else if (C.airborne){
+      // tuck feet under the body while jumping
+      const tx = hip.x - C.facing * 6, ty = hip.y + 52;
+      leg.fx += (tx - leg.fx) * Math.min(1, 14 * dt);
+      leg.fy += (ty - leg.fy) * Math.min(1, 14 * dt);
+    } else {
+      const dist = Math.hypot(leg.homeX - leg.fx, leg.homeY - leg.fy);
+      const thresh = 24 + speedN * 14;
+      const hipDist = Math.hypot(leg.fx - hip.x, leg.fy - hip.y);
+      /* emergency step: a planted foot near full leg extension must step
+         even if the diagonal group is mid-step, or the IK clamps it airborne */
+      const emergency = hipDist > (L1 + L2) * 0.90 || dist > thresh * 1.7;
+      if ((dist > thresh || emergency) && (!groupStepping[1 - leg.group] || emergency)){
+        leg.stepping = true;
+        leg.stepT = 0;
+        leg.fromX = leg.fx; leg.fromY = leg.fy;
+        leg.toX = leg.homeX; leg.toY = leg.homeY;
+        leg.stepDur = Math.max(0.08, Math.min(0.20, dist / 900));
+        leg.stepH = 13 + dist * 0.30;
+        groupStepping[leg.group] = true;
+      }
+    }
+    const ik = solveIK(hip.x, hip.y, leg.fx, leg.fy, leg.bend * C.facing);
+    leg.kneeX = ik.kx; leg.kneeY = ik.ky;
+    leg.fx = ik.fx; leg.fy = ik.fy;   // clamped reach
+    /* terrain cap: a foot never goes below the surface under its current x
+       (keeps step arcs from clipping through cliff edges mid-flight) */
+    const gy2 = groundY(leg.fx);
+    if (leg.fy > gy2) leg.fy = gy2;
+    leg.hipX = hip.x; leg.hipY = hip.y;
+  }
+
+  /* --- tail (Verlet) --- */
+  const rear = spinePoint(SPINE[SPINE.length - 1], 4);
+  const head0 = tail[0];
+  head0.px += (rear.x - head0.x); head0.py += (rear.y - head0.y);
+  head0.x = rear.x; head0.y = rear.y;
+  for (let i = 1; i < TAIL_N; i++){
+    const p = tail[i];
+    const nx = p.x + (p.x - p.px) * 0.90;
+    const ny = p.y + (p.y - p.py) * 0.90 + 26 * dt * dt * 60;
+    p.px = p.x; p.py = p.y; p.x = nx; p.y = ny;
+    p.y += Math.sin(simTime * 2.1 + i * 0.85) * 0.16 * (0.4 + speedN);
+  }
+  for (let k = 0; k < 3; k++){
+    tail[0].x = rear.x; tail[0].y = rear.y;
+    for (let i = 1; i < TAIL_N; i++){
+      const a = tail[i - 1], b = tail[i];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d = Math.hypot(dx, dy) || 1e-4;
+      const diff = (d - TAIL_SEG) / d;
+      b.x -= dx * diff; b.y -= dy * diff;
+    }
+  }
+  for (let i = 1; i < TAIL_N; i++){
+    const gy = groundY(tail[i].x) - 3;
+    if (tail[i].y > gy) tail[i].y = gy;
+  }
+}
+
+/* spine point in world space; wiggleAmp scales the lateral sway */
+function spinePoint(off, r){
+  const C = creature;
+  const idx = SPINE.indexOf(off);
+  const wig = Math.sin(C.walkPhase * 2 + idx * 0.85) * 3.2 * Math.min(1, Math.abs(C.vx) / 120);
+  const c = Math.cos(C.tilt), s = Math.sin(C.tilt);
+  const lx = off * C.facing, ly = wig;
+  return { x: C.x + lx * c - ly * s, y: C.y + lx * s + ly * c, r };
+}
+
+/* ---------------- drawing ---------------- */
+let showSkeleton = false;
+const skelBtn = document.getElementById('skelBtn');
+if (skelBtn && skelBtn.addEventListener) skelBtn.addEventListener('click', () => {
+  showSkeleton = !showSkeleton;
+  skelBtn.classList.toggle('on', showSkeleton);
+});
+
+function draw(){
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#0b1026';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(viewScale, 0, 0, viewScale, viewOX, viewOY);
+
+  /* sky */
+  const sky = ctx.createLinearGradient(0, 0, 0, VH);
+  sky.addColorStop(0, '#0b1026'); sky.addColorStop(0.55, '#14224c'); sky.addColorStop(1, '#1d2f57');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, VW, VH);
+  for (const st of stars){
+    ctx.globalAlpha = 0.35 + 0.3 * (0.5 + 0.5 * Math.sin(simTime * 1.3 + st.p));
+    ctx.fillStyle = '#cfe0ff';
+    ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, 6.2832); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  /* moon */
+  ctx.fillStyle = '#f4ecd2';
+  ctx.beginPath(); ctx.arc(1150, 96, 30, 0, 6.2832); ctx.fill();
+  ctx.fillStyle = 'rgba(244,236,210,0.13)';
+  ctx.beginPath(); ctx.arc(1150, 96, 52, 0, 6.2832); ctx.fill();
+
+  /* parallax hills */
+  drawHillLayer(0.25, '#16264e', 415, 46, 0.0035);
+  drawHillLayer(0.45, '#101d3d', 468, 38, 0.0052);
+
+  drawGround();
+  drawTufts();
+
+  /* creature: far legs, tail, body, near legs */
+  for (const leg of legs) if (leg.side === 'far') drawLeg(leg, '#14685a', '#0f574b');
+  drawTail();
+  drawBody();
+  for (const leg of legs) if (leg.side === 'near') drawLeg(leg, '#2bbfa2', '#1f9c83');
+
+  if (showSkeleton) drawSkeleton();
+}
+
+function drawHillLayer(par, color, baseY, amp, freq){
+  const off = -creature.x * par * 0.22;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, VH);
+  for (let x = 0; x <= VW; x += 16){
+    ctx.lineTo(x, baseY + Math.sin((x + off) * freq) * amp + Math.sin((x + off) * freq * 2.7 + 2) * amp * 0.35);
+  }
+  ctx.lineTo(VW, VH); ctx.closePath(); ctx.fill();
+}
+
+function drawGround(){
+  const g = ctx.createLinearGradient(0, 430, 0, VH);
+  g.addColorStop(0, '#54603a'); g.addColorStop(0.12, '#4a3a26'); g.addColorStop(1, '#2c2015');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(0, VH);
+  for (let x = 0; x <= VW; x += 8) ctx.lineTo(x, groundY(x));
+  ctx.lineTo(VW, VH); ctx.closePath(); ctx.fill();
+  /* grass lip */
+  ctx.strokeStyle = '#57a05e'; ctx.lineWidth = 5; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let x = 0; x <= VW; x += 8){ const y = groundY(x); if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(140,220,140,0.5)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = 0; x <= VW; x += 8){ const y = groundY(x) - 3; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  for (const sp of speckles){
+    const gy = groundY(sp.x);
+    if (gy + sp.dy < VH){ ctx.beginPath(); ctx.arc(sp.x, gy + sp.dy, sp.r, 0, 6.2832); ctx.fill(); }
+  }
+}
+
+function drawTufts(){
+  ctx.strokeStyle = '#63b06a'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  for (const t of tufts){
+    const gy = groundY(t.x);
+    const sway = Math.sin(simTime * 1.7 + t.p) * 2.2;
+    for (let b = -1; b <= 1; b++){
+      ctx.beginPath();
+      ctx.moveTo(t.x + b * 3, gy - 1);
+      ctx.quadraticCurveTo(t.x + b * 4 + sway * 0.4, gy - 8 * t.s, t.x + b * 5 + sway, gy - 13 * t.s);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawLeg(leg, colUpper, colLower){
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = colUpper; ctx.lineWidth = 10;
+  ctx.beginPath(); ctx.moveTo(leg.hipX, leg.hipY); ctx.lineTo(leg.kneeX, leg.kneeY); ctx.stroke();
+  ctx.strokeStyle = colLower; ctx.lineWidth = 7.5;
+  ctx.beginPath(); ctx.moveTo(leg.kneeX, leg.kneeY); ctx.lineTo(leg.fx, leg.fy); ctx.stroke();
+  /* foot */
+  ctx.strokeStyle = colLower; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(leg.fx, leg.fy); ctx.lineTo(leg.fx + creature.facing * 8, leg.fy); ctx.stroke();
+}
+
+function drawTail(){
+  ctx.lineCap = 'round';
+  for (let i = 1; i < TAIL_N; i++){
+    const wdt = 11 * (1 - i / TAIL_N) + 2;
+    ctx.strokeStyle = i % 2 ? '#25b294' : '#2bbfa2';
+    ctx.lineWidth = wdt;
+    ctx.beginPath(); ctx.moveTo(tail[i - 1].x, tail[i - 1].y); ctx.lineTo(tail[i].x, tail[i].y); ctx.stroke();
+  }
+}
+
+function drawBody(){
+  const C = creature;
+  const pts = SPINE.map((off, i) => spinePoint(off, SPINE_R[i]));
+  const axis = { x: Math.cos(C.tilt) * C.facing, y: Math.sin(C.tilt) * C.facing };
+  const up = { x: axis.y, y: -axis.x };
+  if (up.y > 0){ up.x = -up.x; up.y = -up.y; }
+  const top = pts.map(p => ({ x: p.x + up.x * p.r, y: p.y + up.y * p.r }));
+  const bot = pts.map(p => ({ x: p.x - up.x * p.r * 0.94, y: p.y - up.y * p.r * 0.94 }));
+
+  const grad = ctx.createLinearGradient(0, C.y - 30, 0, C.y + 30);
+  grad.addColorStop(0, '#43dcbb'); grad.addColorStop(0.55, '#27b294'); grad.addColorStop(1, '#1a8a72');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(top[0].x, top[0].y);
+  for (let i = 1; i < top.length; i++){
+    const xc = (top[i - 1].x + top[i].x) / 2, yc = (top[i - 1].y + top[i].y) / 2;
+    ctx.quadraticCurveTo(top[i - 1].x, top[i - 1].y, xc, yc);
+  }
+  ctx.lineTo(top[top.length - 1].x, top[top.length - 1].y);
+  for (let i = bot.length - 1; i >= 0; i--){
+    const xc = (bot[i].x + (i > 0 ? bot[i - 1].x : bot[i].x)) / 2;
+    const yc = (bot[i].y + (i > 0 ? bot[i - 1].y : bot[i].y)) / 2;
+    ctx.quadraticCurveTo(bot[i].x, bot[i].y, xc, yc);
+  }
+  ctx.closePath(); ctx.fill();
+
+  /* belly */
+  ctx.fillStyle = 'rgba(198,242,228,0.75)';
+  ctx.beginPath();
+  const bIn = pts.map((p, i) => ({ x: p.x - up.x * (p.r * 0.94 - 6), y: p.y - up.y * (p.r * 0.94 - 6) }));
+  ctx.moveTo(bIn[1].x, bIn[1].y);
+  for (let i = 2; i < bIn.length - 1; i++) ctx.lineTo(bIn[i].x, bIn[i].y);
+  for (let i = bIn.length - 2; i >= 1; i--) ctx.lineTo(pts[i].x - up.x * 2, pts[i].y - up.y * 2 + 4);
+  ctx.closePath(); ctx.fill();
+
+  /* back spots */
+  ctx.fillStyle = 'rgba(13,90,74,0.35)';
+  for (let i = 1; i <= 3; i++){
+    ctx.beginPath(); ctx.arc(pts[i].x + up.x * (pts[i].r - 5), pts[i].y + up.y * (pts[i].r - 5), 3.4, 0, 6.2832); ctx.fill();
+  }
+
+  /* head: eye + cheek */
+  const head = pts[0];
+  const look = pointer.active
+    ? { x: Math.max(-1, Math.min(1, (pointer.x - head.x) / 90)), y: Math.max(-1, Math.min(1, (pointer.y - head.y) / 90)) }
+    : { x: C.facing * 0.7, y: 0.1 };
+  const eyeX = head.x + C.facing * 6 + up.x * 4, eyeY = head.y + up.y * 4 - 2;
+  const eyeR = 6.4 * (C.blink ? 0.12 : 1);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.ellipse(eyeX, eyeY, 6.6, Math.max(0.8, eyeR + 0.6), 0, 0, 6.2832); ctx.fill();
+  if (!C.blink){
+    ctx.fillStyle = '#10222b';
+    ctx.beginPath(); ctx.arc(eyeX + look.x * 2.6, eyeY + look.y * 2.2, 3.1, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(eyeX + look.x * 2.6 + 1, eyeY + look.y * 2.2 - 1, 1.1, 0, 6.2832); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,150,150,0.5)';
+  ctx.beginPath(); ctx.arc(head.x + C.facing * 10, head.y + 6, 3.6, 0, 6.2832); ctx.fill();
+}
+
+function drawSkeleton(){
+  ctx.save();
+  ctx.lineWidth = 1.6;
+  /* ground surface */
+  ctx.strokeStyle = 'rgba(120,200,255,0.55)';
+  ctx.beginPath();
+  for (let x = 0; x <= VW; x += 8){ const y = groundY(x); if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+  ctx.stroke();
+  for (const leg of legs){
+    /* step arc preview */
+    if (leg.stepping){
+      ctx.strokeStyle = 'rgba(255,217,77,0.6)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      for (let t = 0; t <= 1.001; t += 0.1){
+        const x = leg.fromX + (leg.toX - leg.fromX) * t;
+        const y = leg.fromY + (leg.toY - leg.fromY) * t - Math.sin(t * Math.PI) * leg.stepH;
+        if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    /* bones */
+    ctx.strokeStyle = '#ffd94d';
+    ctx.beginPath();
+    ctx.moveTo(leg.hipX, leg.hipY); ctx.lineTo(leg.kneeX, leg.kneeY); ctx.lineTo(leg.fx, leg.fy);
+    ctx.stroke();
+    /* home target */
+    ctx.strokeStyle = '#ff7b7b';
+    ctx.beginPath();
+    ctx.moveTo(leg.homeX - 6, leg.homeY); ctx.lineTo(leg.homeX + 6, leg.homeY);
+    ctx.moveTo(leg.homeX, leg.homeY - 6); ctx.lineTo(leg.homeX, leg.homeY + 6);
+    ctx.stroke();
+    /* joints */
+    ctx.fillStyle = '#ffd94d';
+    for (const p of [[leg.hipX, leg.hipY], [leg.kneeX, leg.kneeY], [leg.fx, leg.fy]]){
+      ctx.beginPath(); ctx.arc(p[0], p[1], 3.4, 0, 6.2832); ctx.fill();
+    }
+  }
+  /* spine chain */
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath();
+  SPINE.forEach((off, i) => { const p = spinePoint(off, 0); if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+  for (let i = 1; i < TAIL_N; i++) ctx.lineTo(tail[i].x, tail[i].y);
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(creature.x, creature.y, 3.4, 0, 6.2832); ctx.fill();
+  ctx.restore();
+}
+
+/* ---------------- main loop ---------------- */
+let lastT = -1, rafId = 0;
+function frame(nowMs){
+  rafId = requestAnimationFrame(frame);
+  const now = nowMs / 1000;
+  if (lastT < 0) lastT = now;
+  let dt = Math.min(0.05, now - lastT);
+  lastT = now;
+  /* fixed-ish substeps for stable stepping */
+  const n = 2;
+  for (let i = 0; i < n; i++) step(dt / n);
+  draw();
+}
+rafId = requestAnimationFrame(frame);
+
+/* debug/test hook */
+window.__IKC = {
+  creature, legs, groundY, tail,
+  state(){
+    return {
+      x: creature.x, y: creature.y, vx: creature.vx, airborne: creature.airborne,
+      legs: legs.map(l => ({ fx: l.fx, fy: l.fy, stepping: l.stepping, kneeX: l.kneeX, kneeY: l.kneeY }))
+    };
+  }
+};
+</script>
+</body>
+</html>
