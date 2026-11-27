@@ -503,7 +503,7 @@ function sortSplats(eye, fwd){
   for(var i=0;i<COUNT;i++){
     depths[i] = (S_POS[i*4]-eye[0])*fwd[0] + (S_POS[i*4+1]-eye[1])*fwd[1] + (S_POS[i*4+2]-eye[2])*fwd[2];
   }
-  indices.sort(function(a,b){ return depths[a]-depths[b]; });
+  indices.sort(function(a,b){ return depths[b]-depths[a]; });
   for(var j=0;j<COUNT;j++) orderData[j] = indices[j];
   gl.bindBuffer(gl.ARRAY_BUFFER, orderBuf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, orderData);
