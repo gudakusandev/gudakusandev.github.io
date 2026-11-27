@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>実験：じゃんけんセルオートマトン | gudakusandev</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #101623; color: #dbe4f5; font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; }
+  body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 18px 12px 28px; }
+  h1 { font-size: 19px; font-weight: 700; letter-spacing: .04em; margin-bottom: 4px; }
+  .sub { font-size: 12.5px; color: #8fa1c0; margin-bottom: 14px; text-align: center; line-height: 1.6; }
+  .stage { width: min(96vw, 880px); }
+  canvas {
+    width: 100%; aspect-ratio: 4 / 3; display: block;
+    background: #0a0f1a; border: 1px solid #2a3550; border-radius: 10px;
+    image-rendering: pixelated; touch-action: none; cursor: crosshair;
+  }
+  .bar-wrap { margin-top: 12px; }
+  .bar {
+    display: flex; height: 18px; border-radius: 6px; overflow: hidden;
+    border: 1px solid #2a3550; background: #0a0f1a;
+  }
+  .bar > div { height: 100%; transition: width .25s ease; }
+  .bar-blue  { background: #2e7ec4; }
+  .bar-green { background: #40b060; }
+  .bar-red   { background: #e86e3c; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 7px; font-size: 12.5px; color: #aebbd6; }
+  .legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .panel {
+    margin-top: 14px; display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center;
+    background: #151d30; border: 1px solid #2a3550; border-radius: 10px; padding: 12px 14px;
+  }
+  .group { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .group .label { font-size: 12px; color: #8fa1c0; margin-right: 2px; }
+  button {
+    appearance: none; border: 1px solid #3a4a6e; background: #1c2740; color: #dbe4f5;
+    font-size: 13px; padding: 7px 13px; border-radius: 7px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #243356; }
+  button.active { border-color: #ffd94d; color: #ffd94d; }
+  button.paint-blue.active  { border-color: #6db9f2; color: #a8d8fa; background: #173a5c; }
+  button.paint-green.active { border-color: #6fe08f; color: #b2f2c4; background: #17402a; }
+  button.paint-red.active   { border-color: #ffb08a; color: #ffd2b8; background: #572a14; }
+  .stat { font-size: 12px; color: #8fa1c0; margin-left: auto; }
+  .note { margin-top: 12px; font-size: 12px; color: #7286a8; line-height: 1.7; max-width: 880px; }
+</style>
+</head>
+<body>
+  <h1>じゃんけんセルオートマトン</h1>
+  <p class="sub">全セルが隣とじゃんけんし、負けた側が勝った側の色に染まる。3色の領地争いは永遠に終わらない。<br>ドラッグで領地を描いて戦局に介入できる。</p>
+
+  <div class="stage">
+    <canvas id="cv" width="256" height="192"></canvas>
+
+    <div class="bar-wrap">
+      <div class="bar">
+        <div class="bar-blue"  id="bar0"></div>
+        <div class="bar-green" id="bar1"></div>
+        <div class="bar-red"   id="bar2"></div>
+      </div>
+      <div class="legend">
+        <span><span class="dot" style="background:#2e7ec4"></span>グー（青） <span id="pct0">33%</span></span>
+        <span><span class="dot" style="background:#40b060"></span>チョキ（緑） <span id="pct1">33%</span></span>
+        <span><span class="dot" style="background:#e86e3c"></span>パー（橙） <span id="pct2">33%</span></span>
+        <span style="color:#7286a8">グーはチョキに勝ち、チョキはパーに勝ち、パーはグーに勝つ</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="group">
+        <span class="label">描く色</span>
+        <button class="paint-blue active" id="paint0">グー（青）</button>
+        <button class="paint-green" id="paint1">チョキ（緑）</button>
+        <button class="paint-red" id="paint2">パー（橙）</button>
+      </div>
+      <div class="group">
+        <button id="btnPause">一時停止</button>
+        <button id="btnReset">リセット</button>
+      </div>
+      <div class="group">
+        <span class="label">速度</span>
+        <button class="spd" data-spd="1">低速</button>
+        <button class="spd active" data-spd="3">通常</button>
+        <button class="spd" data-spd="8">高速</button>
+      </div>
+      <div class="stat"><span id="gen">0</span> 世代</div>
+    </div>
+
+    <p class="note">ルール：各セルは毎世代、ランダムに選んだ隣のセルとじゃんけんし、負けたら相手の手に変わる。戦いが停滞すると突然変異（ランダムな反乱セル）が起きて戦局が動き続ける。最近染まったセルは明るく光る。</p>
+  </div>
+
+<script>
+(() => {
+  const W = 256, H = 192, N = W * H;
+  // 手: 0=グー(青) 1=チョキ(緑) 2=パー(橙)
+  // BEATS[a] = a が勝つ相手
+  const BEATS = new Uint8Array([1, 2, 0]);
+
+  const state = new Uint8Array(N);
+  const noise = new Uint8Array(N);   // セル固有の濃淡ノイズ (0..255)
+  const heat  = new Uint8Array(N);   // 染まった直後の発光 (0..255)
+  for (let i = 0; i < N; i++) noise[i] = (Math.random() * 256) | 0;
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  const px = img.data;
+  for (let i = 3; i < px.length; i += 4) px[i] = 255;
+
+  // 状態ごとの基本色 [r,g,b]
+  const BASE = [
+    [46, 126, 196],   // グー 青
+    [64, 176, 96],    // チョキ 緑
+    [232, 110, 60],   // パー 橙
+  ];
+
+  let gen = 0;
+  let paused = false;
+  let speed = 3;          // 1フレームあたりの世代数
+  let paintColor = 0;
+  let recentChanges = 0;  // 停滞検出用：直近の変化数
+
+  function initField() {
+    // 粗いグリッドのランダムを拡大して、有機的な領地の初期配置にする
+    const CW = 32, CH = 24, coarse = new Uint8Array(CW * CH);
+    for (let i = 0; i < coarse.length; i++) coarse[i] = (Math.random() * 3) | 0;
+    for (let y = 0; y < H; y++) {
+      const cy = Math.min(CH - 1, (y / (H / CH)) | 0);
+      for (let x = 0; x < W; x++) {
+        const cx = Math.min(CW - 1, (x / (W / CW)) | 0);
+        let s = coarse[cy * CW + cx];
+        if (Math.random() < 0.08) s = (Math.random() * 3) | 0; // 境界を荒らす
+        state[y * W + x] = s;
+      }
+    }
+    heat.fill(0);
+    gen = 0;
+    recentChanges = N; // 初期は停滞扱いにしない
+  }
+
+  function step() {
+    let changes = 0;
+    for (let y = 0; y < H; y++) {
+      const yu = y === 0 ? H - 1 : y - 1;
+      const yd = y === H - 1 ? 0 : y + 1;
+      const rowU = yu * W, row = y * W, rowD = yd * W;
+      for (let x = 0; x < W; x++) {
+        const i = row + x;
+        const me = state[i];
+        // 8近傍からランダムに1セル選んで対戦（端はトーラス状に接続）
+        const xl = x === 0 ? W - 1 : x - 1;
+        const xr = x === W - 1 ? 0 : x + 1;
+        const r = (Math.random() * 8) | 0;
+        let nb;
+        switch (r) {
+          case 0: nb = state[rowU + xl]; break;
+          case 1: nb = state[rowU + x];  break;
+          case 2: nb = state[rowU + xr]; break;
+          case 3: nb = state[row + xl];  break;
+          case 4: nb = state[row + xr];  break;
+          case 5: nb = state[rowD + xl]; break;
+          case 6: nb = state[rowD + x];  break;
+          default: nb = state[rowD + xr]; break;
+        }
+        if (nb !== me && BEATS[nb] === me) {
+          // 相手が自分に勝つ手 → 自分が相手の色に染まる
+          state[i] = nb;
+          heat[i] = 255;
+          changes++;
+        }
+      }
+    }
+    gen++;
+    recentChanges = recentChanges * 0.9 + changes * 0.1;
+
+    // 常時わずかな突然変異（反乱セル）で戦いを終わらせない
+    for (let k = 0; k < 3; k++) {
+      const i = (Math.random() * N) | 0;
+      state[i] = (Math.random() * 3) | 0;
+      heat[i] = 255;
+    }
+    // 停滞検出：変化がほぼ止まったら反乱を大規模に起こす
+    if (recentChanges < N * 0.0008) {
+      for (let k = 0; k < 400; k++) {
+        const i = (Math.random() * N) | 0;
+        state[i] = (Math.random() * 3) | 0;
+        heat[i] = 255;
+      }
+      recentChanges = N * 0.01;
+    }
+  }
+
+  const bars = [document.getElementById('bar0'), document.getElementById('bar1'), document.getElementById('bar2')];
+  const pcts = [document.getElementById('pct0'), document.getElementById('pct1'), document.getElementById('pct2')];
+  const genEl = document.getElementById('gen');
+
+  function render() {
+    const counts = [0, 0, 0];
+    for (let i = 0, j = 0; i < N; i++, j += 4) {
+      const s = state[i];
+      counts[s]++;
+      const base = BASE[s];
+      const f = 0.80 + (noise[i] / 255) * 0.36;      // 濃淡ノイズ
+      const glow = (heat[i] / 255) * 0.35;           // 染まった直後は明るく
+      const m = f + glow;
+      px[j]     = Math.min(255, base[0] * m);
+      px[j + 1] = Math.min(255, base[1] * m);
+      px[j + 2] = Math.min(255, base[2] * m);
+      if (heat[i] > 0) heat[i] = heat[i] > 14 ? heat[i] - 14 : 0;
+    }
+    ctx.putImageData(img, 0, 0);
+    for (let s = 0; s < 3; s++) {
+      const p = (counts[s] / N) * 100;
+      bars[s].style.width = p.toFixed(1) + '%';
+      pcts[s].textContent = p.toFixed(1) + '%';
+    }
+    genEl.textContent = gen.toLocaleString();
+  }
+
+  function frame() {
+    if (!paused) for (let k = 0; k < speed; k++) step();
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---- 介入：ドラッグで領地を描く ----
+  let painting = false;
+  function paintAt(ev) {
+    const rect = cv.getBoundingClientRect();
+    const gx = ((ev.clientX - rect.left) / rect.width) * W;
+    const gy = ((ev.clientY - rect.top) / rect.height) * H;
+    const R = 6;
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dy * dy > R * R) continue;
+        const x = Math.round(gx + dx), y = Math.round(gy + dy);
+        if (x < 0 || x >= W || y < 0 || y >= H) continue;
+        if (Math.random() < 0.85) { // ブラシの縁を少し荒らす
+          const i = y * W + x;
+          state[i] = paintColor;
+          heat[i] = 255;
+        }
+      }
+    }
+  }
+  cv.addEventListener('pointerdown', (ev) => { painting = true; cv.setPointerCapture(ev.pointerId); paintAt(ev); });
+  cv.addEventListener('pointermove', (ev) => { if (painting) paintAt(ev); });
+  cv.addEventListener('pointerup', () => { painting = false; });
+  cv.addEventListener('pointercancel', () => { painting = false; });
+
+  // ---- UI ----
+  const paintBtns = [document.getElementById('paint0'), document.getElementById('paint1'), document.getElementById('paint2')];
+  paintBtns.forEach((b, i) => b.addEventListener('click', () => {
+    paintColor = i;
+    paintBtns.forEach((bb, j) => bb.classList.toggle('active', j === i));
+  }));
+
+  const btnPause = document.getElementById('btnPause');
+  function togglePause() {
+    paused = !paused;
+    btnPause.textContent = paused ? '再開' : '一時停止';
+    btnPause.classList.toggle('active', paused);
+  }
+  btnPause.addEventListener('click', togglePause);
+  window.addEventListener('keydown', (ev) => {
+    if (ev.code === 'Space' && ev.target === document.body) { ev.preventDefault(); togglePause(); }
+  });
+
+  document.getElementById('btnReset').addEventListener('click', initField);
+  document.querySelectorAll('.spd').forEach((b) => b.addEventListener('click', () => {
+    speed = parseInt(b.dataset.spd, 10);
+    document.querySelectorAll('.spd').forEach((bb) => bb.classList.toggle('active', bb === b));
+  }));
+
+  initField();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>粘菌シミュレーション Physarum | 実験 slime-mold</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #0d1420;
+    color: #d7e3f2;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    padding: 10px 14px 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 14px;
+  }
+  header h1 { font-size: 16px; font-weight: 700; letter-spacing: .04em; }
+  header h1 span { color: #9fd66a; }
+  header p { font-size: 11.5px; color: #8fa3bd; }
+  #fps { margin-left: auto; font-size: 11px; color: #6f8299; font-variant-numeric: tabular-nums; }
+  .controls {
+    padding: 4px 14px 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .group .label { color: #8fa3bd; font-size: 11px; }
+  button, select {
+    background: #182540;
+    color: #d7e3f2;
+    border: 1px solid #2c405f;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover, select:hover { border-color: #4a6b9c; }
+  button.active {
+    background: #2c5a2e;
+    border-color: #9fd66a;
+    color: #eaffd0;
+  }
+  button.modeErase.active { background: #5a2e2e; border-color: #e08a8a; color: #ffe3e3; }
+  input[type="range"] { width: 92px; accent-color: #9fd66a; }
+  .val { color: #9fd66a; font-variant-numeric: tabular-nums; min-width: 34px; display: inline-block; }
+  #stage { flex: 1; position: relative; min-height: 0; }
+  canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: none;
+    cursor: crosshair;
+  }
+  .hint {
+    position: absolute; left: 12px; bottom: 10px;
+    font-size: 11px; color: rgba(215,227,242,.55);
+    pointer-events: none;
+    text-shadow: 0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>粘菌シミュレーション <span>Physarum</span></h1>
+  <p>数万のエージェントがフェロモンを嗅いで進み、血管状の網が自己組織化する。クリック／ドラッグでエサを置くと、網が張り直される。</p>
+  <div id="fps"></div>
+</header>
+
+<div class="controls">
+  <div class="group">
+    <span class="label">エージェント数</span>
+    <select id="agentCount">
+      <option value="10000">1万</option>
+      <option value="25000" selected>2.5万</option>
+      <option value="40000">4万</option>
+      <option value="70000">7万</option>
+    </select>
+  </div>
+  <div class="group">
+    <span class="label">型プリセット</span>
+    <button data-preset="vessel" class="presetBtn active">血管</button>
+    <button data-preset="cell" class="presetBtn">細胞・泡</button>
+    <button data-preset="dendrite" class="presetBtn">樹状</button>
+  </div>
+  <div class="group">
+    <span class="label">センサー角</span>
+    <input type="range" id="sensorAngle" min="5" max="60" step="0.5" value="22.5"><span class="val" id="sensorAngleVal">22.5°</span>
+    <span class="label">回転角</span>
+    <input type="range" id="rotAngle" min="5" max="90" step="0.5" value="45"><span class="val" id="rotAngleVal">45°</span>
+    <span class="label">センサー距離</span>
+    <input type="range" id="sensorDist" min="3" max="25" step="1" value="11"><span class="val" id="sensorDistVal">11</span>
+  </div>
+</div>
+<div class="controls">
+  <div class="group">
+    <span class="label">エサの型</span>
+    <button id="foodSlime">スライム型</button>
+    <button id="foodRing">円形</button>
+    <button id="foodRandom">ランダム</button>
+    <button id="foodClear">エサを消す</button>
+  </div>
+  <div class="group">
+    <span class="label">ブラシ</span>
+    <button id="modeFood" class="active">エサを置く</button>
+    <button id="modeErase" class="modeErase">エサを消す</button>
+  </div>
+  <div class="group">
+    <button id="pauseBtn">一時停止</button>
+    <button id="resetBtn">リセット</button>
+  </div>
+</div>
+
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div class="hint">ドラッグでエサを置く／消す（モード切替は上のボタン）</div>
+</div>
+
+<script>
+"use strict";
+(function () {
+  // ---------- 基本セットアップ ----------
+  var stage = document.getElementById('stage');
+  var view = document.getElementById('view');
+  var vctx = view.getContext('2d');
+
+  // 内部解像度は表示の半分程度（上限・下限つき）
+  var rect = stage.getBoundingClientRect();
+  var dispW = Math.max(320, Math.floor(rect.width));
+  var dispH = Math.max(240, Math.floor(rect.height));
+  view.width = dispW; view.height = dispH;
+
+  var W = Math.min(760, Math.max(300, Math.floor(dispW / 2)));
+  var H = Math.min(520, Math.max(220, Math.floor(dispH / 2)));
+  // 表示アスペクトに合わせる
+  H = Math.max(200, Math.round(W * dispH / dispW));
+  if (H > 520) { H = 520; W = Math.round(H * dispW / dispH); }
+
+  var sim = document.createElement('canvas');
+  sim.width = W; sim.height = H;
+  var sctx = sim.getContext('2d');
+  var img = sctx.createImageData(W, H);
+  var px = img.data;
+  var N = W * H;
+
+  // ---------- フィールド ----------
+  var trail = new Float32Array(N);   // フェロモンマップ
+  var trail2 = new Float32Array(N);  // 拡散用ダブルバッファ
+  var food = new Float32Array(N);    // エサ（誘引物質）マップ
+
+  // ---------- パラメータ (Jeff Jones モデル) ----------
+  var P = {
+    sensorAngle: 22.5 * Math.PI / 180, // 前方左右センサーの開き角
+    rotAngle:    45.0 * Math.PI / 180, // 1ステップの回転角
+    sensorDist:  11,                   // センサー距離 (px)
+    deposit:     1.0,                  // 1ステップのフェロモン放出量
+    decay:       0.90,                 // 拡散後の減衰率
+    foodWeight:  5.0                   // センサーにおけるエサの重み
+  };
+
+  // ---------- エージェント ----------
+  var MAXA = 70000;
+  var ax = new Float32Array(MAXA);
+  var ay = new Float32Array(MAXA);
+  var aa = new Float32Array(MAXA);
+  var agentNum = 25000;
+
+  function spawnAgents() {
+    for (var i = 0; i < agentNum; i++) {
+      ax[i] = Math.random() * W;
+      ay[i] = Math.random() * H;
+      aa[i] = Math.random() * Math.PI * 2;
+    }
+  }
+
+  // ---------- センサー ----------
+  // 座標はトーラス（画面端を回り込む）でサンプルする
+  function sample(x, y) {
+    var xi = ((Math.round(x) % W) + W) % W;
+    var yi = ((Math.round(y) % H) + H) % H;
+    var idx = yi * W + xi;
+    return trail[idx] + P.foodWeight * food[idx];
+  }
+
+  // ---------- 1ステップ: 移動と放出 ----------
+  function stepAgents() {
+    var sA = P.sensorAngle, rA = P.rotAngle, sD = P.sensorDist;
+    for (var i = 0; i < agentNum; i++) {
+      var x = ax[i], y = ay[i], a = aa[i];
+      var ca = Math.cos(a), sa = Math.sin(a);
+      var la = a - sA, ra = a + sA;
+      var f  = sample(x + ca * sD,               y + sa * sD);
+      var fl = sample(x + Math.cos(la) * sD,     y + Math.sin(la) * sD);
+      var fr = sample(x + Math.cos(ra) * sD,     y + Math.sin(ra) * sD);
+
+      if (f > fl && f > fr) {
+        // 直進
+      } else if (f < fl && f < fr) {
+        a += (Math.random() < 0.5 ? -rA : rA); // 前方が一番弱い場合はランダムに旋回
+      } else if (fl < fr) {
+        a += rA;
+      } else if (fr < fl) {
+        a -= rA;
+      }
+
+      var nx = x + Math.cos(a);
+      var ny = y + Math.sin(a);
+      if (nx < 0) nx += W; else if (nx >= W) nx -= W;
+      if (ny < 0) ny += H; else if (ny >= H) ny -= H;
+      ax[i] = nx; ay[i] = ny; aa[i] = a;
+
+      trail[(ny | 0) * W + (nx | 0)] += P.deposit;
+    }
+  }
+
+  // ---------- 拡散と減衰 (3x3 平均 → decay 倍) ----------
+  function diffuse() {
+    var decay = P.decay;
+    for (var y = 0; y < H; y++) {
+      var yu = (y === 0 ? H - 1 : y - 1) * W;
+      var yc = y * W;
+      var yd = (y === H - 1 ? 0 : y + 1) * W;
+      for (var x = 0; x < W; x++) {
+        var xl = (x === 0 ? W - 1 : x - 1);
+        var xr = (x === W - 1 ? 0 : x + 1);
+        var s = trail[yu + xl] + trail[yu + x] + trail[yu + xr]
+              + trail[yc + xl] + trail[yc + x] + trail[yc + xr]
+              + trail[yd + xl] + trail[yd + x] + trail[yd + xr];
+        trail2[yc + x] = (s / 9) * decay;
+      }
+    }
+    var t = trail; trail = trail2; trail2 = t;
+  }
+
+  // ---------- 描画: 濃度 → 色 (黄緑→シアン→白の発光グラデーション) ----------
+  var LUT_R = new Uint8Array(256), LUT_G = new Uint8Array(256), LUT_B = new Uint8Array(256);
+  (function buildLUT() {
+    // キーポイント: 0=背景 / 0.25=深緑 / 0.55=黄緑 / 0.8=シアン寄り黄緑 / 1=白
+    var stops = [
+      [0.00,  13,  20,  32],
+      [0.22,  10,  46,  26],
+      [0.50,  46, 140,  44],
+      [0.72, 140, 224,  58],
+      [0.88, 120, 240, 190],
+      [1.00, 235, 255, 244]
+    ];
+    for (var i = 0; i < 256; i++) {
+      var t = i / 255;
+      for (var s = 0; s < stops.length - 1; s++) {
+        var a = stops[s], b = stops[s + 1];
+        if (t >= a[0] && t <= b[0]) {
+          var u = (t - a[0]) / (b[0] - a[0]);
+          LUT_R[i] = a[1] + (b[1] - a[1]) * u;
+          LUT_G[i] = a[2] + (b[2] - a[2]) * u;
+          LUT_B[i] = a[3] + (b[3] - a[3]) * u;
+          break;
+        }
+      }
+    }
+  })();
+
+  function render() {
+    for (var i = 0, j = 0; i < N; i++, j += 4) {
+      var v = trail[i];
+      var n = v / (v + 1.1);              // ソフトニーで 0..1 に正規化
+      var li = (n * 255) | 0;
+      var r = LUT_R[li], g = LUT_G[li], b = LUT_B[li];
+      var f = food[i];
+      if (f > 0.03) {                      // エサは琥珀色に重ねる
+        var w = Math.min(1, f) * 0.85;
+        r = r + (255 - r) * w;
+        g = g + (176 - g) * w;
+        b = b + (64 - b) * w;
+      }
+      px[j] = r; px[j + 1] = g; px[j + 2] = b; px[j + 3] = 255;
+    }
+    sctx.putImageData(img, 0, 0);
+    vctx.imageSmoothingEnabled = true;
+    vctx.drawImage(sim, 0, 0, view.width, view.height);
+  }
+
+  // ---------- エサの配置 ----------
+  function putFood(cx, cy, radius, value) {
+    var r2 = radius * radius;
+    var x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(W - 1, Math.ceil(cx + radius));
+    var y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(H - 1, Math.ceil(cy + radius));
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var dx = x - cx, dy = y - cy;
+        if (dx * dx + dy * dy <= r2) {
+          var idx = y * W + x;
+          if (value > food[idx]) food[idx] = value;
+        }
+      }
+    }
+  }
+  function eraseFood(cx, cy, radius) {
+    var r2 = radius * radius;
+    var x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(W - 1, Math.ceil(cx + radius));
+    var y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(H - 1, Math.ceil(cy + radius));
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var dx = x - cx, dy = y - cy;
+        if (dx * dx + dy * dy <= r2) food[y * W + x] = 0;
+      }
+    }
+  }
+  function clearFood() { food.fill(0); }
+
+  // ドット絵スライム (1文字 = 1ブロック)
+  var SLIME_MAP = [
+    "......######......",
+    "....##########....",
+    "...############...",
+    "..##############..",
+    "..##..####..##....",
+    "..##..####..##....",
+    ".################.",
+    ".################.",
+    ".################.",
+    "..##############..",
+    "...############...",
+    "....##.####.##....",
+    "...##..####..##..."
+  ];
+  function foodSlime() {
+    clearFood();
+    var rows = SLIME_MAP.length, cols = SLIME_MAP[0].length;
+    var block = Math.max(4, Math.floor(Math.min(W, H) * 0.55 / cols));
+    var ox = (W - cols * block) / 2, oy = (H - rows * block) / 2;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        if (SLIME_MAP[r].charAt(c) === '#') {
+          putFood(ox + c * block + block / 2, oy + r * block + block / 2, block * 0.62, 1.0);
+        }
+      }
+    }
+  }
+  function foodRing() {
+    clearFood();
+    var cx = W / 2, cy = H / 2;
+    var R = Math.min(W, H) * 0.32;
+    var dots = 12;
+    for (var i = 0; i < dots; i++) {
+      var a = (i / dots) * Math.PI * 2;
+      putFood(cx + Math.cos(a) * R, cy + Math.sin(a) * R, 7, 1.0);
+    }
+    putFood(cx, cy, 7, 1.0);
+  }
+  function foodRandom() {
+    clearFood();
+    for (var i = 0; i < 14; i++) {
+      putFood(20 + Math.random() * (W - 40), 20 + Math.random() * (H - 40), 6 + Math.random() * 3, 1.0);
+    }
+  }
+
+  // ---------- 入力 (マウス＋タッチ: Pointer Events) ----------
+  var brushErase = false;
+  var painting = false;
+  function toSim(ev) {
+    var r = view.getBoundingClientRect();
+    return {
+      x: (ev.clientX - r.left) / r.width * W,
+      y: (ev.clientY - r.top) / r.height * H
+    };
+  }
+  function paint(ev) {
+    var p = toSim(ev);
+    if (brushErase) eraseFood(p.x, p.y, 13);
+    else putFood(p.x, p.y, 10, 1.0);
+  }
+  view.addEventListener('pointerdown', function (ev) {
+    painting = true;
+    view.setPointerCapture(ev.pointerId);
+    paint(ev);
+    ev.preventDefault();
+  });
+  view.addEventListener('pointermove', function (ev) {
+    if (painting) paint(ev);
+  });
+  view.addEventListener('pointerup', function () { painting = false; });
+  view.addEventListener('pointercancel', function () { painting = false; });
+  view.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+
+  // ---------- UI ----------
+  var $ = function (id) { return document.getElementById(id); };
+
+  $('agentCount').addEventListener('change', function () {
+    agentNum = parseInt(this.value, 10);
+    spawnAgents();
+  });
+
+  var PRESETS = {
+    vessel:   { sa: 22.5, ra: 45, so: 11 },
+    cell:     { sa: 40,   ra: 30, so: 14 },
+    dendrite: { sa: 12,   ra: 60, so: 8  }
+  };
+  function applyPreset(name) {
+    var p = PRESETS[name];
+    $('sensorAngle').value = p.sa;
+    $('rotAngle').value = p.ra;
+    $('sensorDist').value = p.so;
+    syncParams();
+    var btns = document.querySelectorAll('.presetBtn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-preset') === name);
+    }
+  }
+  function syncParams() {
+    P.sensorAngle = parseFloat($('sensorAngle').value) * Math.PI / 180;
+    P.rotAngle = parseFloat($('rotAngle').value) * Math.PI / 180;
+    P.sensorDist = parseFloat($('sensorDist').value);
+    $('sensorAngleVal').textContent = $('sensorAngle').value + '°';
+    $('rotAngleVal').textContent = $('rotAngle').value + '°';
+    $('sensorDistVal').textContent = $('sensorDist').value;
+  }
+  ['sensorAngle', 'rotAngle', 'sensorDist'].forEach(function (id) {
+    $(id).addEventListener('input', function () {
+      syncParams();
+      var btns = document.querySelectorAll('.presetBtn');
+      for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+    });
+  });
+  document.querySelectorAll('.presetBtn').forEach(function (b) {
+    b.addEventListener('click', function () { applyPreset(b.getAttribute('data-preset')); });
+  });
+
+  $('foodSlime').addEventListener('click', foodSlime);
+  $('foodRing').addEventListener('click', foodRing);
+  $('foodRandom').addEventListener('click', foodRandom);
+  $('foodClear').addEventListener('click', clearFood);
+
+  $('modeFood').addEventListener('click', function () {
+    brushErase = false;
+    this.classList.add('active');
+    $('modeErase').classList.remove('active');
+  });
+  $('modeErase').addEventListener('click', function () {
+    brushErase = true;
+    this.classList.add('active');
+    $('modeFood').classList.remove('active');
+  });
+
+  var paused = false;
+  $('pauseBtn').addEventListener('click', function () {
+    paused = !paused;
+    this.textContent = paused ? '再開' : '一時停止';
+    this.classList.toggle('active', paused);
+  });
+  $('resetBtn').addEventListener('click', function () {
+    trail.fill(0); trail2.fill(0);
+    spawnAgents();
+  });
+
+  // ---------- メインループ ----------
+  var fpsEl = $('fps');
+  var frames = 0, lastFpsT = performance.now();
+  function loop(now) {
+    requestAnimationFrame(loop);
+    if (!paused) {
+      stepAgents();
+      diffuse();
+      render();
+    }
+    frames++;
+    if (now - lastFpsT >= 500) {
+      var fps = Math.round(frames * 1000 / (now - lastFpsT));
+      fpsEl.textContent = fps + ' fps / エージェント ' + agentNum.toLocaleString() + ' / ' + W + '×' + H;
+      frames = 0; lastFpsT = now;
+    }
+  }
+
+  // ---------- 初期化 ----------
+  spawnAgents();
+  syncParams();
+  foodSlime(); // 最初からスライム型のエサを置き、網が張られていく様子を見せる
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

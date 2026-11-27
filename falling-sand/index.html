@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>実験：落ち砂・粉体シミュレーション</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #101623; color: #dbe4f5; font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; padding: 14px 10px 28px; }
+  h1 { font-size: 17px; font-weight: 700; letter-spacing: .04em; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: #8fa0bd; margin-bottom: 10px; text-align: center; line-height: 1.6; }
+  #wrap { width: min(96vw, 880px); }
+  canvas {
+    width: 100%; display: block; background: #101623;
+    border: 1px solid #26314a; border-radius: 8px;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    touch-action: none; cursor: crosshair;
+  }
+  .panel {
+    margin-top: 10px; background: #171e2e; border: 1px solid #26314a; border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+  }
+  .palette { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pbtn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #202a42; color: #dbe4f5; border: 1px solid #33415f; border-radius: 999px;
+    font-size: 12px; padding: 5px 11px 5px 7px; cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  .pbtn .dot { width: 13px; height: 13px; border-radius: 50%; border: 1px solid rgba(0,0,0,.45); flex: none; }
+  .pbtn.sel { border-color: #ffd94d; color: #ffd94d; background: #2a3350; }
+  .ctl { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #aebbd6; }
+  .ctl input[type="range"] { width: 110px; accent-color: #ffd94d; }
+  .abtn {
+    background: #202a42; color: #dbe4f5; border: 1px solid #33415f; border-radius: 6px;
+    font-size: 12px; padding: 6px 12px; cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  .abtn:active { background: #2a3350; }
+  #fps { font-size: 11px; color: #66779a; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .hint { margin-top: 8px; font-size: 11.5px; color: #66779a; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>落ち砂・粉体シミュレーション</h1>
+  <p class="sub">セルオートマトンで動く粉体実験。ブラシで描いて、崩して、溶かして、燃やす。</p>
+  <canvas id="cv" width="400" height="300"></canvas>
+  <div class="panel">
+    <div class="palette" id="palette"></div>
+    <label class="ctl">ブラシ <input type="range" id="brush" min="1" max="30" value="8"><span id="brushVal">8</span></label>
+    <button class="abtn" id="sceneBtn">デモシーン</button>
+    <button class="abtn" id="clearBtn">クリア</button>
+    <span id="fps"></span>
+  </div>
+  <p class="hint">
+    ドラッグで描画（タッチ対応）。砂は水や油に沈み、水は油に沈み、油は水に浮く。火は油に燃え移り、煙になって昇る。水をかけると火は消えて蒸気になる。
+    スライムの足元を掘る・油だまりに火をつける、あたりから試すのがおすすめ。
+  </p>
+</div>
+
+<script>
+"use strict";
+// ===== 基本設定 =====
+const W = 400, H = 300, N = W * H;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const img = ctx.createImageData(W, H);
+const pix = new Uint32Array(img.data.buffer);
+
+// 素材ID
+const EMPTY = 0, WALL = 1,
+      SAND_Y = 2, SAND_R = 3, SAND_B = 4, SAND_C = 5, SAND_G = 6, SAND_P = 7,
+      WATER = 8, OIL = 9, FIRE = 10, SMOKE = 11, STEAM = 12;
+
+const type = new Uint8Array(N);      // 素材
+const variant = new Uint8Array(N);   // 粒感・色ブレ用
+const life = new Int16Array(N);      // 火・煙の残り寿命
+const mark = new Uint32Array(N);     // このステップで処理済みか
+let stepCount = 0;
+
+const isSand = t => t >= SAND_Y && t <= SAND_P;
+const isLiquid = t => t === WATER || t === OIL;
+const isGas = t => t === SMOKE || t === STEAM;
+const isPassable = t => t === EMPTY || t === FIRE || isGas(t); // 砂や液体が落ち込める先
+
+// ===== 色テーブル（variant 16段階の陰影）=====
+const BG_R = 16, BG_G = 22, BG_B = 35; // #101623
+function abgr(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
+function hsl(h, s, l) {
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  let r, g, b;
+  if (h < 60) { r = c; g = x; b = 0; } else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; } else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; } else { r = c; g = 0; b = x; }
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+function shadeTable(h, s, l, spread) {
+  const t = [];
+  for (let i = 0; i < 16; i++) {
+    const [r, g, b] = hsl(h, s, l + (i / 15 - 0.5) * spread);
+    t.push(abgr(r, g, b));
+  }
+  return t;
+}
+const COLORS = [];
+COLORS[WALL]   = shadeTable(222, 14, 34, 12);
+COLORS[SAND_Y] = shadeTable(43, 92, 55, 15);
+COLORS[SAND_R] = shadeTable(4, 85, 55, 14);
+COLORS[SAND_B] = shadeTable(212, 85, 58, 14);
+COLORS[SAND_C] = shadeTable(195, 88, 70, 12);
+COLORS[SAND_G] = shadeTable(140, 68, 48, 14);
+COLORS[SAND_P] = shadeTable(275, 72, 63, 13);
+COLORS[WATER]  = shadeTable(217, 82, 52, 13);
+COLORS[OIL]    = shadeTable(33, 78, 27, 15);
+const BG_PIX = abgr(BG_R, BG_G, BG_B);
+
+// ===== セル操作 =====
+function setCell(i, t) {
+  type[i] = t;
+  variant[i] = (Math.random() * 256) | 0;
+  if (t === FIRE) life[i] = 30 + (Math.random() * 50) | 0;
+  else if (t === SMOKE) life[i] = 140 + (Math.random() * 120) | 0;
+  else if (t === STEAM) life[i] = 50 + (Math.random() * 60) | 0;
+  else life[i] = 0;
+}
+function clearCell(i) { type[i] = EMPTY; life[i] = 0; }
+function moveCell(from, to) {
+  type[to] = type[from]; variant[to] = variant[from]; life[to] = life[from];
+  clearCell(from); mark[to] = stepCount;
+}
+function swapCell(a, b) {
+  const t = type[a], v = variant[a], l = life[a];
+  type[a] = type[b]; variant[a] = variant[b]; life[a] = life[b];
+  type[b] = t; variant[b] = v; life[b] = l;
+  mark[a] = mark[b] = stepCount;
+}
+
+// ===== 素材ごとの更新 =====
+function updateSand(x, y, i) {
+  if (y >= H - 1) return;
+  const below = i + W, bt = type[below];
+  if (isPassable(bt)) { moveCell(i, below); return; }
+  if (isLiquid(bt)) { swapCell(i, below); return; }        // 砂は液体に沈む
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  for (let k = 0; k < 2; k++) {
+    const dx = k === 0 ? dir : -dir, nx = x + dx;
+    if (nx < 0 || nx >= W) continue;
+    const d = below + dx, dt = type[d];
+    if (isPassable(dt)) { moveCell(i, d); return; }
+    if (isLiquid(dt)) { swapCell(i, d); return; }
+  }
+}
+function flowSideways(x, y, i, disp) {
+  // 液体の横流れ：空きがある方向へ最大 disp セル進む
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  let cx = x, ci = i;
+  for (let s = 0; s < disp; s++) {
+    const nx = cx + dir;
+    if (nx < 0 || nx >= W) break;
+    const ni = ci + dir;
+    if (type[ni] !== EMPTY) break;
+    moveCell(ci, ni);
+    cx = nx; ci = ni;
+  }
+}
+function updateWater(x, y, i) {
+  if (y < H - 1) {
+    const below = i + W, bt = type[below];
+    if (bt === EMPTY) { moveCell(i, below); return; }
+    if (bt === FIRE) { moveCell(i, below); if (type[i] === EMPTY && Math.random() < 0.5) setCell(i, STEAM); return; }
+    if (bt === OIL) { swapCell(i, below); return; }        // 水は油に沈む
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    for (let k = 0; k < 2; k++) {
+      const dx = k === 0 ? dir : -dir, nx = x + dx;
+      if (nx < 0 || nx >= W) continue;
+      const d = below + dx, dt = type[d];
+      if (dt === EMPTY) { moveCell(i, d); return; }
+      if (dt === FIRE) { moveCell(i, d); if (type[i] === EMPTY && Math.random() < 0.5) setCell(i, STEAM); return; }
+      if (dt === OIL) { swapCell(i, d); return; }
+    }
+  }
+  flowSideways(x, y, i, 5);
+}
+function updateOil(x, y, i) {
+  // 隣の火から燃え移る（界面で燃焼が続く）
+  for (const [dx, dy] of NB8) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+    if (type[ny * W + nx] === FIRE && Math.random() < 0.03) { setCell(i, FIRE); mark[i] = stepCount; return; }
+  }
+  if (y < H - 1) {
+    const below = i + W, bt = type[below];
+    if (bt === EMPTY) { moveCell(i, below); return; }
+    if (bt === FIRE) {                                  // 油が火に触れたら燃え移る
+      if (Math.random() < 0.5) { setCell(i, FIRE); mark[i] = stepCount; }
+      else moveCell(i, below);
+      return;
+    }
+    // 水には沈まない（浮く）
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    for (let k = 0; k < 2; k++) {
+      const dx = k === 0 ? dir : -dir, nx = x + dx;
+      if (nx < 0 || nx >= W) continue;
+      const d = below + dx, dt = type[d];
+      if (dt === EMPTY) { moveCell(i, d); return; }
+      if (dt === FIRE) {
+        if (Math.random() < 0.5) { setCell(i, FIRE); mark[i] = stepCount; }
+        else moveCell(i, d);
+        return;
+      }
+    }
+  }
+  flowSideways(x, y, i, 3);
+}
+const NB4 = [[0,-1],[0,1],[-1,0],[1,0]];
+const NB8 = [[0,-1],[0,1],[-1,0],[1,0],[-1,-1],[1,-1],[-1,1],[1,1]];
+function updateFire(x, y, i) {
+  life[i]--;
+  if (life[i] <= 0) {
+    if (Math.random() < 0.35) setCell(i, SMOKE); else clearCell(i);
+    mark[i] = stepCount; return;
+  }
+  // 水に触れたら消えて蒸気になる
+  for (const [dx, dy] of NB4) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+    const n = ny * W + nx;
+    if (type[n] === WATER) {
+      if (Math.random() < 0.4) clearCell(n);
+      setCell(i, STEAM); mark[i] = stepCount; return;
+    }
+  }
+  // 油への延焼
+  for (const [dx, dy] of NB8) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+    const n = ny * W + nx;
+    if (type[n] === OIL && Math.random() < 0.05) {
+      setCell(n, FIRE); mark[n] = stepCount;
+      life[i] += 2; // 燃料がある間は火も長持ちする
+    }
+  }
+  // 真下が油なら燃え移すまでその場に留まる（燃料の表面で燃え続ける）
+  const belowIsOil = y < H - 1 && type[i + W] === OIL;
+  if (belowIsOil) {
+    if (Math.random() < 0.12) { setCell(i + W, FIRE); mark[i + W] = stepCount; life[i] += 2; }
+    return;
+  }
+  // 煙を出す
+  if (y > 0 && type[i - W] === EMPTY && Math.random() < 0.07) setCell(i - W, SMOKE);
+  // ゆらめきながら上昇
+  const r = Math.random();
+  if (y > 0 && type[i - W] === EMPTY && r < 0.38) { moveCell(i, i - W); return; }
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  if (y > 0) {
+    const d = i - W + dir;
+    if (x + dir >= 0 && x + dir < W && type[d] === EMPTY && r < 0.55) { moveCell(i, d); return; }
+  }
+  if (r < 0.12) {
+    const s = i + dir;
+    if (x + dir >= 0 && x + dir < W && type[s] === EMPTY) moveCell(i, s);
+  }
+}
+function updateGas(x, y, i, t) {
+  life[i]--;
+  if (life[i] <= 0) { clearCell(i); mark[i] = stepCount; return; }
+  if (y > 0) {
+    const above = i - W, at = type[above];
+    if (at === EMPTY && Math.random() < 0.9) { moveCell(i, above); return; }
+    if (isLiquid(at)) { swapCell(i, above); return; }      // 液体の中では泡として昇る
+    const dir = (variant[i] & 1) ? 1 : -1;
+    for (let k = 0; k < 2; k++) {
+      const dx = k === 0 ? dir : -dir, nx = x + dx;
+      if (nx < 0 || nx >= W) continue;
+      if (type[above + dx] === EMPTY && Math.random() < 0.6) { moveCell(i, above + dx); return; }
+    }
+  }
+  // 横へ漂う
+  if (Math.random() < 0.25) {
+    const dir = Math.random() < 0.5 ? 1 : -1, nx = x + dir;
+    if (nx >= 0 && nx < W && type[i + dir] === EMPTY) moveCell(i, i + dir);
+  }
+}
+
+// ===== シミュレーション本体 =====
+function step() {
+  stepCount++;
+  // 落下系は下から上へ走査
+  for (let y = H - 1; y >= 0; y--) {
+    const ltr = ((y + stepCount) & 1) === 0;
+    const row = y * W;
+    for (let xi = 0; xi < W; xi++) {
+      const x = ltr ? xi : W - 1 - xi;
+      const i = row + x, t = type[i];
+      if (t === EMPTY || t === WALL || mark[i] === stepCount) continue;
+      if (isSand(t)) updateSand(x, y, i);
+      else if (t === WATER) updateWater(x, y, i);
+      else if (t === OIL) updateOil(x, y, i);
+    }
+  }
+  // 上昇系（火・煙・蒸気）は上から下へ走査
+  for (let y = 0; y < H; y++) {
+    const ltr = ((y + stepCount) & 1) === 1;
+    const row = y * W;
+    for (let xi = 0; xi < W; xi++) {
+      const x = ltr ? xi : W - 1 - xi;
+      const i = row + x, t = type[i];
+      if (mark[i] === stepCount) continue;
+      if (t === FIRE) updateFire(x, y, i);
+      else if (isGas(t)) updateGas(x, y, i, t);
+    }
+  }
+}
+
+// ===== 描画 =====
+function render() {
+  for (let i = 0; i < N; i++) {
+    const t = type[i];
+    if (t === EMPTY) { pix[i] = BG_PIX; continue; }
+    if (t === FIRE) {
+      const f = life[i] / 80, r = Math.random();
+      if (f > 0.55 && r < 0.8) pix[i] = abgr(255, 236, 170);
+      else if (f > 0.28) pix[i] = abgr(255, 150 + ((Math.random() * 40) | 0), 30);
+      else pix[i] = abgr(225, 55, 18);
+      continue;
+    }
+    if (t === SMOKE || t === STEAM) {
+      const max = t === SMOKE ? 260 : 110;
+      const a = Math.max(0, Math.min(1, life[i] / max));
+      const base = t === SMOKE ? 78 + (variant[i] >> 3) % 26 : 168 + (variant[i] >> 3) % 30;
+      const g = Math.round(BG_R + (base - BG_R) * a);
+      const gg = Math.round(BG_G + (base + 4 - BG_G) * a);
+      const b = Math.round(BG_B + (base + 10 - BG_B) * a);
+      pix[i] = abgr(g, gg, b); continue;
+    }
+    pix[i] = COLORS[t][variant[i] >> 4];
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ===== 初期シーン（色砂スライム＋水そう＋油だまり）=====
+function put(x, y, t) { if (x >= 0 && x < W && y >= 0 && y < H) setCell(y * W + x, t); }
+function fillRect(x0, y0, x1, y1, t) { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) put(x, y, t); }
+function buildScene() {
+  type.fill(EMPTY); life.fill(0);
+  const floorY = H - 8;
+  fillRect(0, floorY, W - 1, H - 1, WALL);                    // 床
+  // 左：水の入った壁の水そう
+  fillRect(16, 248, 18, floorY - 1, WALL);
+  fillRect(82, 248, 84, floorY - 1, WALL);
+  fillRect(19, 262, 81, floorY - 1, WATER);
+  // 中央：色砂のスライム
+  const cx = 190, cy = floorY, rx = 55, ry = 34;
+  for (let y = cy - ry; y <= cy; y++) for (let x = cx - rx; x <= cx + rx; x++) {
+    const dx = (x - cx) / rx, dy = (y - cy) / ry;
+    if (dx * dx + dy * dy <= 1) put(x, y, SAND_B);
+  }
+  for (let y = cy - 16; y <= cy; y++) for (let x = cx - 34; x <= cx + 34; x++) {  // お腹は水色
+    const dx = (x - cx) / 34, dy = (y - cy) / 16;
+    if (dx * dx + dy * dy <= 1) put(x, y, SAND_C);
+  }
+  for (const ex of [cx - 20, cx + 20])                          // 目（抜き）
+    for (let y = cy - 26; y <= cy - 14; y++) for (let x = ex - 3; x <= ex + 3; x++) {
+      const dx = (x - ex) / 3.5, dy = (y - (cy - 20)) / 6.5;
+      if (dx * dx + dy * dy <= 1) clearCell(y * W + x);
+    }
+  for (let a = 0; a <= 6; a++) {                                // 口（抜きの弧）
+    const th = Math.PI * (0.15 + 0.7 * a / 6);
+    put(cx + Math.round(Math.cos(th) * 8), cy - 10 + Math.round(Math.sin(th) * 4), EMPTY);
+    clearCell((cy - 10 + Math.round(Math.sin(th) * 4)) * W + cx + Math.round(Math.cos(th) * 8));
+  }
+  fillRect(cx - 42, cy - 16, cx - 36, cy - 12, SAND_R);         // ほっぺ
+  fillRect(cx + 36, cy - 16, cx + 42, cy - 12, SAND_R);
+  fillRect(cx - 34, cy - 31, cx - 29, cy - 27, SAND_C);         // ハイライト
+  // スライムと水そうの間：赤砂の小山
+  for (let r = 0; r < 12; r++) fillRect(100 + r, floorY - 12 + r, 124 - r, floorY - 12 + r, SAND_R);
+  // 右：床の油だまりと、壁の器に入った油
+  fillRect(262, floorY - 3, 296, floorY - 1, OIL);
+  fillRect(316, 258, 318, floorY - 1, WALL);
+  fillRect(370, 258, 372, floorY - 1, WALL);
+  fillRect(319, 268, 369, floorY - 1, OIL);
+  // 仕上げに黄砂の小山（右端）
+  for (let r = 0; r < 9; r++) fillRect(378 + r, floorY - 9 + r, 394 - r, floorY - 9 + r, SAND_Y);
+}
+
+// ===== UI =====
+const MATERIALS = [
+  [SAND_Y, '黄砂', '#f2b63d'], [SAND_R, '赤砂', '#ec4a3a'], [SAND_B, '青砂', '#3f8fe8'],
+  [SAND_C, '水色砂', '#6fd3f2'], [SAND_G, '緑砂', '#3ecf6e'], [SAND_P, '紫砂', '#a678ec'],
+  [WATER, '水', '#2f6fe0'], [OIL, '油', '#8a5416'], [FIRE, '火', '#ff7a26'],
+  [WALL, '壁', '#59637a'], [-1, '消しゴム', '#39415a'],
+];
+let curMat = SAND_Y;
+const paletteEl = document.getElementById('palette');
+for (const [m, label, color] of MATERIALS) {
+  const b = document.createElement('button');
+  b.className = 'pbtn' + (m === curMat ? ' sel' : '');
+  b.innerHTML = '<span class="dot" style="background:' + color + '"></span>' + label;
+  b.addEventListener('click', () => {
+    curMat = m;
+    paletteEl.querySelectorAll('.pbtn').forEach(el => el.classList.remove('sel'));
+    b.classList.add('sel');
+  });
+  paletteEl.appendChild(b);
+}
+const brushEl = document.getElementById('brush'), brushVal = document.getElementById('brushVal');
+brushEl.addEventListener('input', () => brushVal.textContent = brushEl.value);
+document.getElementById('clearBtn').addEventListener('click', () => { type.fill(EMPTY); life.fill(0); });
+document.getElementById('sceneBtn').addEventListener('click', buildScene);
+
+// ===== ブラシ入力（マウス＋タッチ）=====
+let pointerDown = false, px = 0, py = 0, lastX = -1, lastY = -1;
+function toCell(e) {
+  const r = cv.getBoundingClientRect();
+  return [Math.floor((e.clientX - r.left) / r.width * W), Math.floor((e.clientY - r.top) / r.height * H)];
+}
+function applyBrush(cx, cy) {
+  const r = parseInt(brushEl.value, 10);
+  for (let y = cy - r; y <= cy + r; y++) {
+    if (y < 0 || y >= H) continue;
+    for (let x = cx - r; x <= cx + r; x++) {
+      if (x < 0 || x >= W) continue;
+      const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      if (d2 > r * r) continue;
+      const i = y * W + x;
+      if (curMat === -1) { clearCell(i); continue; }
+      // 砂・液体は粒感のため少し間引く
+      if ((isSand(curMat) || isLiquid(curMat)) && d2 > r * r * 0.45 && Math.random() < 0.35) continue;
+      setCell(i, curMat);
+    }
+  }
+}
+function strokeTo(x, y) {
+  if (lastX < 0) { applyBrush(x, y); }
+  else {
+    const dist = Math.hypot(x - lastX, y - lastY), steps = Math.max(1, Math.ceil(dist / 3));
+    for (let s = 0; s <= steps; s++)
+      applyBrush(Math.round(lastX + (x - lastX) * s / steps), Math.round(lastY + (y - lastY) * s / steps));
+  }
+  lastX = x; lastY = y;
+}
+cv.addEventListener('pointerdown', e => {
+  pointerDown = true; cv.setPointerCapture(e.pointerId);
+  const [x, y] = toCell(e); px = x; py = y; lastX = -1; strokeTo(x, y);
+  e.preventDefault();
+});
+cv.addEventListener('pointermove', e => {
+  if (!pointerDown) return;
+  const [x, y] = toCell(e); px = x; py = y; strokeTo(x, y);
+});
+const endPointer = () => { pointerDown = false; lastX = -1; };
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+
+// ===== メインループ =====
+const fpsEl = document.getElementById('fps');
+let frames = 0, lastFpsT = performance.now();
+function animate(now) {
+  if (pointerDown) applyBrush(px, py);
+  step(); step();               // 1フレーム2ステップで落下感を出す
+  render();
+  frames++;
+  if (now - lastFpsT >= 500) {
+    fpsEl.textContent = Math.round(frames * 1000 / (now - lastFpsT)) + ' fps';
+    frames = 0; lastFpsT = now;
+  }
+  requestAnimationFrame(animate);
+}
+buildScene();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

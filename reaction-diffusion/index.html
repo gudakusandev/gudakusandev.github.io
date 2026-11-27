@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>反応拡散シミュレーション</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    background:#101623;
+    color:#dfe9f5;
+    font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    display:flex; flex-direction:column; align-items:center;
+    overflow:hidden;
+    -webkit-user-select:none; user-select:none;
+  }
+  header {
+    width:100%; max-width:960px;
+    padding:10px 14px 6px;
+    display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+  }
+  h1 { font-size:15px; font-weight:600; letter-spacing:.08em; margin-right:6px; color:#eaf4ff; }
+  h1 small { display:block; font-size:10px; font-weight:400; color:#7d90ad; letter-spacing:.02em; margin-top:2px; }
+  .presets { display:flex; flex-wrap:wrap; gap:6px; }
+  button {
+    background:#1a2740; color:#cfe2f7; border:1px solid #31456b;
+    border-radius:999px; padding:5px 13px; font-size:12px; cursor:pointer;
+    font-family:inherit; transition:background .15s,border-color .15s;
+  }
+  button:hover { background:#24365a; }
+  button.active { background:#0e5f86; border-color:#39b6e8; color:#fff; }
+  .spacer { flex:1; }
+  .util button { background:transparent; }
+  main {
+    flex:1; width:100%; display:flex; align-items:center; justify-content:center;
+    padding:6px 10px 12px; min-height:0;
+  }
+  #stage {
+    position:relative; border-radius:10px; overflow:hidden;
+    box-shadow:0 0 42px rgba(38,140,220,.28), 0 0 0 1px #22345a;
+    line-height:0;
+  }
+  canvas { display:block; touch-action:none; cursor:crosshair; }
+  footer {
+    padding:0 14px 10px; font-size:11px; color:#7186a3; text-align:center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>反応拡散<small>Gray-Scott モデル ― 2つの化学物質の反応と拡散</small></h1>
+  <div class="presets" id="presets"></div>
+  <div class="spacer"></div>
+  <div class="util">
+    <button id="reseed">種をまき直す</button>
+    <button id="pause">一時停止</button>
+  </div>
+</header>
+<main>
+  <div id="stage"><canvas id="cv"></canvas></div>
+</main>
+<footer>ドラッグで種を置くと、そこから模様が育ちます。プリセットで反応のルール（feed / kill）が変わります。</footer>
+
+<script>
+'use strict';
+/* ============================================================
+   Gray-Scott 反応拡散モデル
+   du/dt = Du * lap(u) - u*v^2 + F*(1-u)
+   dv/dt = Dv * lap(v) + u*v^2 - (F+k)*v
+   ラプラシアンは 3x3 畳み込み（直交 0.2 / 斜め 0.05 / 中心 -1）
+   ============================================================ */
+const GW = 288, GH = 216;              // グリッド解像度
+const N  = GW * GH;
+const Du = 1.0, Dv = 0.5, DT = 1.0;    // 拡散係数と時間刻み（Karl Sims 形式）
+const STEPS = 8;                       // 1フレームあたりの積分ステップ数
+
+let U  = new Float32Array(N), V  = new Float32Array(N);
+let U2 = new Float32Array(N), V2 = new Float32Array(N);
+
+const PRESETS = [
+  { name:'珊瑚', feed:0.0545, kill:0.0620 },
+  { name:'斑点', feed:0.0300, kill:0.0620 },
+  { name:'迷路', feed:0.0290, kill:0.0570 },
+  { name:'波紋', feed:0.0140, kill:0.0540 },
+  { name:'泡',   feed:0.0980, kill:0.0570 },
+];
+let cur = PRESETS[0];
+
+function step() {
+  const F = cur.feed, K = cur.kill, FK = F + K;
+  for (let y = 0; y < GH; y++) {
+    const yu = (y === 0 ? GH - 1 : y - 1) * GW;
+    const yc = y * GW;
+    const yd = (y === GH - 1 ? 0 : y + 1) * GW;
+    for (let x = 0; x < GW; x++) {
+      const xl = x === 0 ? GW - 1 : x - 1;
+      const xr = x === GW - 1 ? 0 : x + 1;
+      const i = yc + x;
+      const u = U[i], v = V[i];
+      const lapU = -u
+        + 0.2  * (U[yc + xl] + U[yc + xr] + U[yu + x] + U[yd + x])
+        + 0.05 * (U[yu + xl] + U[yu + xr] + U[yd + xl] + U[yd + xr]);
+      const lapV = -v
+        + 0.2  * (V[yc + xl] + V[yc + xr] + V[yu + x] + V[yd + x])
+        + 0.05 * (V[yu + xl] + V[yu + xr] + V[yd + xl] + V[yd + xr]);
+      const uvv = u * v * v;
+      U2[i] = u + (Du * lapU - uvv + F * (1 - u)) * DT;
+      V2[i] = v + (Dv * lapV + uvv - FK * v) * DT;
+    }
+  }
+  const tU = U; U = U2; U2 = tU;
+  const tV = V; V = V2; V2 = tV;
+}
+
+/* ---------- 種まき ---------- */
+function stamp(cx, cy, r) {
+  for (let y = -r; y <= r; y++) {
+    const yy = cy + y;
+    if (yy < 0 || yy >= GH) continue;
+    for (let x = -r; x <= r; x++) {
+      const xx = cx + x;
+      if (xx < 0 || xx >= GW) continue;
+      if (x * x + y * y <= r * r) {
+        const i = yy * GW + xx;
+        V[i] = 1.0; U[i] = 0.0;
+      }
+    }
+  }
+}
+function reseed() {
+  U.fill(1); V.fill(0);
+  // 中央付近とランダムな位置に種をまく
+  stamp(GW >> 1, GH >> 1, 5);
+  for (let s = 0; s < 14; s++) {
+    stamp((Math.random() * GW) | 0, (Math.random() * GH) | 0, 3 + (Math.random() * 4 | 0));
+  }
+}
+
+/* ---------- 描画（濃度 → 深い青→シアン→白の発光グラデーション） ---------- */
+const LUT = new Uint8Array(256 * 3);
+(function buildLUT() {
+  const stops = [
+    [0.00,   8,  18,  44],   // 深い青
+    [0.25,  10,  52, 110],
+    [0.50,  14, 110, 178],   // 青
+    [0.72,  32, 190, 224],   // シアン
+    [0.88, 150, 235, 248],
+    [1.00, 255, 255, 255],   // 白
+  ];
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let a = stops[0], b = stops[stops.length - 1];
+    for (let s = 0; s < stops.length - 1; s++) {
+      if (t >= stops[s][0] && t <= stops[s + 1][0]) { a = stops[s]; b = stops[s + 1]; break; }
+    }
+    const f = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
+    LUT[i * 3]     = a[1] + (b[1] - a[1]) * f;
+    LUT[i * 3 + 1] = a[2] + (b[2] - a[2]) * f;
+    LUT[i * 3 + 2] = a[3] + (b[3] - a[3]) * f;
+  }
+})();
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const off = document.createElement('canvas');
+off.width = GW; off.height = GH;
+const offCtx = off.getContext('2d');
+const img = offCtx.createImageData(GW, GH);
+const px = img.data;
+
+function render() {
+  for (let i = 0, j = 0; i < N; i++, j += 4) {
+    let t = V[i] * 2.1;                 // V濃度 0〜0.45 程度を 0〜1 に広げる
+    if (t > 1) t = 1;
+    const li = (t * 255) | 0;
+    px[j]     = LUT[li * 3];
+    px[j + 1] = LUT[li * 3 + 1];
+    px[j + 2] = LUT[li * 3 + 2];
+    px[j + 3] = 255;
+  }
+  offCtx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(off, 0, 0, cv.width, cv.height);
+}
+
+/* ---------- レイアウト ---------- */
+function layout() {
+  const main = document.querySelector('main');
+  const availW = main.clientWidth - 20, availH = main.clientHeight - 18;
+  const scale = Math.max(1, Math.min(availW / GW, availH / GH));
+  cv.width  = Math.floor(GW * scale);
+  cv.height = Math.floor(GH * scale);
+}
+window.addEventListener('resize', layout);
+
+/* ---------- 入力（マウス＋タッチ：Pointer Events） ---------- */
+let drawing = false, lastGX = -1, lastGY = -1;
+const BRUSH = 5;
+function toGrid(e) {
+  const r = cv.getBoundingClientRect();
+  return [
+    Math.floor((e.clientX - r.left) / r.width * GW),
+    Math.floor((e.clientY - r.top) / r.height * GH),
+  ];
+}
+function drawLine(x0, y0, x1, y1) {
+  const dist = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let s = 0; s <= dist; s++) {
+    stamp(Math.round(x0 + (x1 - x0) * s / dist), Math.round(y0 + (y1 - y0) * s / dist), BRUSH);
+  }
+}
+cv.addEventListener('pointerdown', e => {
+  drawing = true;
+  cv.setPointerCapture(e.pointerId);
+  const [gx, gy] = toGrid(e);
+  stamp(gx, gy, BRUSH);
+  lastGX = gx; lastGY = gy;
+});
+cv.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const [gx, gy] = toGrid(e);
+  drawLine(lastGX, lastGY, gx, gy);
+  lastGX = gx; lastGY = gy;
+});
+const stopDraw = () => { drawing = false; };
+cv.addEventListener('pointerup', stopDraw);
+cv.addEventListener('pointercancel', stopDraw);
+
+/* ---------- UI ---------- */
+const presetsEl = document.getElementById('presets');
+PRESETS.forEach((p, idx) => {
+  const b = document.createElement('button');
+  b.textContent = p.name;
+  if (idx === 0) b.classList.add('active');
+  b.addEventListener('click', () => {
+    cur = p;
+    presetsEl.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    reseed();
+  });
+  presetsEl.appendChild(b);
+});
+document.getElementById('reseed').addEventListener('click', reseed);
+let paused = false;
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? '再開' : '一時停止';
+});
+
+/* ---------- メインループ ---------- */
+function frame() {
+  if (!paused) {
+    for (let s = 0; s < STEPS; s++) step();
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+layout();
+reseed();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

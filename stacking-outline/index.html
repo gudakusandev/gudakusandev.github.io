@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>実験：スプライトスタッキング×輪郭</title>
+<style>
+  body{margin:0;background:#0a0f1c;color:#dbe7f5;font-family:system-ui,-apple-system,'Hiragino Sans',sans-serif}
+  .wrap{max-width:720px;margin:0 auto;padding:18px 14px 28px}
+  h1{font-size:18px;margin:2px 0 4px}
+  .sub{font-size:12.5px;color:#8fa8c8;margin:0 0 12px;line-height:1.7}
+  canvas{width:100%;height:auto;display:block;border-radius:10px;touch-action:none;cursor:grab;image-rendering:pixelated;background:#131f38}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+  .btn{flex:1 1 18%;min-width:96px;padding:9px 4px;border-radius:10px;border:1px solid #2b3c5c;background:#16233c;color:#dbe7f5;font-size:12.5px;font-weight:700;cursor:pointer}
+  .btn.on{background:#ffd94d;color:#131f38;border-color:#ffd94d}
+  .sliderRow{gap:12px}
+  .sliderRow label{font-size:12.5px;font-weight:700;color:#8fa8c8;white-space:nowrap}
+  .sliderRow input[type=range]{flex:1;accent-color:#ffd94d}
+  .sliderRow .val{font-size:12.5px;font-weight:700;min-width:2.2em;text-align:right}
+  .note{font-size:12.5px;color:#a9bedd;line-height:1.8;margin-top:12px;background:#101a2e;border:1px solid #22334f;border-radius:10px;padding:10px 12px}
+  .note b{color:#ffd94d}
+</style>
+</head>
+<body>
+<div class="wrap" id="olRoot">
+  <h1>スプライトスタッキング × 輪郭</h1>
+  <p class="sub">実験 #002（スライム×スタッキング擬似3D）の続編。同じ浮島＋スライムのシーンで、輪郭の付け方を切り替えて立体感の差を比べる。</p>
+  <canvas id="olCv" width="680" height="460"></canvas>
+  <div class="row" id="olMethods">
+    <button class="btn on" data-m="none">輪郭なし</button>
+    <button class="btn" data-m="slice">スライス輪郭</button>
+    <button class="btn" data-m="silhouette">シルエット</button>
+    <button class="btn" data-m="edge">エッジ検出</button>
+  </div>
+  <div class="row sliderRow">
+    <label for="olThick">輪郭の太さ</label>
+    <input type="range" id="olThick" min="1" max="3" step="1" value="1">
+    <span class="val" id="olThickVal">1px</span>
+  </div>
+  <div class="row">
+    <button class="btn" data-act="hop">ぴょんぴょん</button>
+    <button class="btn" data-act="attack">パンチ</button>
+    <button class="btn" data-act="stretch">びよーん</button>
+    <button class="btn" data-act="melt">とける</button>
+    <button class="btn" data-act="idle">待機</button>
+  </div>
+  <div class="row">
+    <button class="btn" id="olRot">自動回転: ON</button>
+  </div>
+  <p class="note" id="olDesc"></p>
+  <p class="note">ドラッグで回せる。タップでつぶれる。島も木も岩もスライムも全部「断面レイヤーの重ね描き」で、3Dモデルは使っていない。</p>
+</div>
+<script>
+(function(){
+"use strict";
+var cv=document.getElementById('olCv'),ctx=cv.getContext('2d');
+var W=680,H=460,PW=136,PH=92,TILT=0.72;
+var off=document.createElement('canvas'); off.width=PW; off.height=PH;
+var o=off.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+var img=o.createImageData(PW,PH), buf=new Uint32Array(img.data.buffer);
+function C(hex){ var n=parseInt(hex.slice(1),16); return (0xFF000000|((n&0xFF)<<16)|(((n>>8)&0xFF)<<8)|((n>>16)&0xFF))>>>0; }
+var COL={
+  bg:C('#131f38'), ground:C('#0a0f1c'),
+  grass:[C('#1e6b34'),C('#2c8a44'),C('#3fae5f'),C('#5cc774'),C('#8fe39b')],
+  dirt:[C('#4a2f18'),C('#6e4525'),C('#8a5a33')],
+  slime:[C('#17456b'),C('#2470a8'),C('#3f9fd8'),C('#7cccf2'),C('#c8f0fc')],
+  trunk:[C('#4a2c14'),C('#7a4a26')],
+  rock:[C('#5d666e'),C('#9aa3ad'),C('#c3ccd4')],
+  crystal:[C('#2b7f8c'),C('#4fc4d4'),C('#9ff2ec')],
+  ink:C('#0e2438'), shadow:C('#1e6b34'), flower:C('#ffd94d'), flower2:C('#ff9fb2'),
+  outline:C('#05080f')
+};
+function setPx(x,y,c){ if(x>=0&&x<PW&&y>=0&&y<PH) buf[y*PW+x]=c; }
+function fillAll(c){ buf.fill(c); }
+// ---- 輪郭設定 ----
+var outlineMode='none';   // none | slice | silhouette | edge
+var olThick=1;
+var DESC={
+  none:'<b>輪郭なし</b>：断面スライスをそのまま重ねた素の擬似3D。色の段差だけで立体を表現している。',
+  slice:'<b>スライス輪郭</b>：各スライスを描くとき、その断面マスクの「隣のピクセルが断面の外」な境界ピクセルを検出し、素材パレットの最濃色で塗る。スライス1枚ごとに輪郭が付くので、物体の外周だけでなく積み重なりの段差にも線が出て、層構造そのものが見える。太さは境界を内側へ広げて調整する。',
+  silhouette:'<b>シルエット輪郭</b>：描き上がったシーンの不透明マスク（背景と地面以外）を取り、太さの分だけ膨らませて、はみ出した部分を濃紺で背後に敷く。シーン全体が1枚のシールのように縁取られ、背景からの分離が一番強くなる。物体同士の境目は消える。',
+  edge:'<b>エッジ検出</b>：描き上がった絵を後処理し、「右隣・下隣と色が違う」ピクセル＝色の境界を検出して濃く落とす。物体の境目に加え、パレットの段差（崖の縞、スライムの階調の境目）にも線が出る、画像処理としての輪郭抽出。'
+};
+// ---- ワールド ----
+var IC={x:68,y:52};
+var theta=0.6, rotVel=0, autoRot=true;
+function w2s(wx,wy,z){
+  var rx=wx*Math.cos(theta)-wy*Math.sin(theta);
+  var ry=wx*Math.sin(theta)+wy*Math.cos(theta);
+  return {x:IC.x+rx, y:IC.y+ry*TILT-z, depth:ry};
+}
+// 断面ディスク: まずマスク(ピクセル集合)を作り、スライス輪郭モードでは境界を検出してから塗る
+function disc(cx,cy,r,ang,pal,base,spot){
+  var cos=Math.cos(ang),sin=Math.sin(ang);
+  var yMax=Math.ceil(r*TILT);
+  var pts=[], set={};
+  for(var dy=-yMax;dy<=yMax;dy++){
+    for(var dx=-Math.ceil(r);dx<=Math.ceil(r);dx++){
+      var ux=dx, uy=dy/TILT;
+      var lx=ux*cos+uy*sin, ly=-ux*sin+uy*cos;
+      var d2=lx*lx+ly*ly;
+      if(d2>r*r) continue;
+      var idx=base;
+      if(spot){
+        var sx=lx-r*0.48, sy=ly+r*0.30;
+        if(sx*sx+sy*sy<(r*0.30)*(r*0.30)) idx=base-1;
+      }
+      if(idx<0)idx=0; if(idx>pal.length-1)idx=pal.length-1;
+      var px=Math.round(cx+dx), py=Math.round(cy+dy);
+      if(px<0||px>=PW||py<0||py>=PH) continue;
+      var key=px+','+py;
+      if(set[key]===undefined){ pts.push([px,py,pal[idx]]); }
+      set[key]=pts.length-1;
+    }
+  }
+  if(outlineMode==='slice' && r>1.2 && pal.length>1){
+    var bound={};
+    var i,p;
+    for(i=0;i<pts.length;i++){ p=pts[i];
+      if(set[(p[0]+1)+','+p[1]]===undefined||set[(p[0]-1)+','+p[1]]===undefined||
+         set[p[0]+','+(p[1]+1)]===undefined||set[p[0]+','+(p[1]-1)]===undefined) bound[p[0]+','+p[1]]=1;
+    }
+    for(var k=1;k<olThick;k++){
+      var add=[];
+      for(i=0;i<pts.length;i++){ p=pts[i]; var key2=p[0]+','+p[1];
+        if(bound[key2]) continue;
+        if(bound[(p[0]+1)+','+p[1]]||bound[(p[0]-1)+','+p[1]]||bound[p[0]+','+(p[1]+1)]||bound[p[0]+','+(p[1]-1)]) add.push(key2);
+      }
+      for(i=0;i<add.length;i++) bound[add[i]]=1;
+    }
+    var oc=pal[0];
+    for(i=0;i<pts.length;i++){ p=pts[i]; setPx(p[0],p[1], bound[p[0]+','+p[1]]?oc:p[2]); }
+  } else {
+    for(var j=0;j<pts.length;j++) setPx(pts[j][0],pts[j][1],pts[j][2]);
+  }
+}
+function discPlain(cx,cy,r,pal,base){ disc(cx,cy,r,0,pal,base,false); }
+// ---- 輪郭ポストプロセス ----
+function dilateMask(mask,times){
+  var cur=mask;
+  for(var k=0;k<times;k++){
+    var nxt=cur.slice();
+    for(var y=0;y<PH;y++) for(var x=0;x<PW;x++){
+      var i=y*PW+x; if(cur[i]) continue;
+      if((x>0&&cur[i-1])||(x<PW-1&&cur[i+1])||(y>0&&cur[i-PW])||(y<PH-1&&cur[i+PW])) nxt[i]=1;
+    }
+    cur=nxt;
+  }
+  return cur;
+}
+function applySilhouette(){
+  var mask=new Uint8Array(PW*PH), i;
+  for(i=0;i<PW*PH;i++) mask[i]=(buf[i]!==COL.bg && buf[i]!==COL.ground)?1:0;
+  var dil=dilateMask(mask,olThick);
+  for(i=0;i<PW*PH;i++) if(dil[i]&&!mask[i]) buf[i]=COL.outline;
+}
+function darken(c){
+  var r=(c&0xFF)*0.35, g=((c>>8)&0xFF)*0.35, b=((c>>16)&0xFF)*0.35;
+  return (0xFF000000|((b|0)<<16)|((g|0)<<8)|(r|0))>>>0;
+}
+function applyEdge(){
+  var edge=new Uint8Array(PW*PH);
+  for(var y=0;y<PH;y++) for(var x=0;x<PW;x++){
+    var i=y*PW+x, c=buf[i];
+    if((x<PW-1&&buf[i+1]!==c)||(y<PH-1&&buf[i+PW]!==c)) edge[i]=1;
+  }
+  if(olThick>1) edge=dilateMask(edge,olThick-1);
+  for(var j=0;j<PW*PH;j++) if(edge[j]) buf[j]=darken(buf[j]);
+}
+// ---- スライム状態 ----
+var N=26,R0=13,LH=0.62;
+var ox=[],ov=[];
+for(var i=0;i<N;i++){ox.push(0);ov.push(0);}
+var squash=1,squashV=0,wob=0,wobV=0,meltA=0,meltV=0;
+var mode='idle',modeT=0,auto=true,autoT=0;
+var blink=0,attackAmt=0,eyeStyle='normal',hopLift=0;
+var slimeW={x:2,y:8};
+function profile(t){
+  if(t<0.15){ return 0.90+0.10*(t/0.15); }
+  var u=(t-0.15)/0.85;
+  return Math.sqrt(Math.max(0.03,1-Math.pow(u,2.4)))*0.97+0.03;
+}
+function spring(cur,vel,target,k,c,dt){
+  var f=(target-cur)*k-vel*c; vel+=f*dt; cur+=vel*dt; return [cur,vel];
+}
+function gauss(x,c,w){ var d=(x-c)/w; return Math.exp(-d*d); }
+var last=performance.now(),elapsed=0;
+var LABELS={idle:'待機',hop:'ぴょんぴょん',attack:'パンチ',stretch:'びよーん',melt:'とける→復活'};
+var MODE_JA={none:'輪郭なし',slice:'スライス輪郭',silhouette:'シルエット',edge:'エッジ検出'};
+function frame(now){
+  var dt=Math.min(0.033,(now-last)/1000); last=now; elapsed+=dt;
+  modeT+=dt; if(auto){autoT+=dt;}
+  if(auto&&autoT>3.6){ autoT=0;
+    var seq=['hop','attack','stretch','melt','idle'];
+    mode=seq[(seq.indexOf(mode)+1)%seq.length]; modeT=0;
+  }
+  if(autoRot) theta+=0.45*dt;
+  theta+=rotVel*dt; rotVel*=Math.pow(0.12,dt);
+  var targetSquash=1+Math.sin(elapsed*2.2)*0.03;
+  var targetWob=Math.sin(elapsed*1.7)*0.8;
+  var targetMelt=0; eyeStyle='normal'; hopLift=0;
+  if(mode==='hop'){
+    var ph=(modeT%0.9)/0.9;
+    if(ph<0.25) targetSquash=0.58;
+    else if(ph<0.5){ targetSquash=1.2; }
+    else if(ph<0.75){ targetSquash=1.02; hopLift=Math.sin((ph-0.5)/0.25*Math.PI)*5; }
+    else targetSquash=0.72;
+  } else if(mode==='attack'){
+    var ph2=(modeT%1.5)/1.5, amt=0;
+    if(ph2<0.2) amt=-1.6*(ph2/0.2);
+    else if(ph2<0.42) amt=8*((ph2-0.2)/0.22);
+    else if(ph2<0.6) amt=8;
+    else amt=8*(1-(ph2-0.6)/0.4);
+    attackAmt=amt; targetSquash=1-Math.abs(amt)*0.012;
+  } else if(mode==='stretch'){
+    var ph3=(modeT%2.2)/2.2;
+    targetSquash=1+Math.sin(ph3*Math.PI)*0.8;
+    targetWob=Math.sin(elapsed*9)*1.2*Math.sin(ph3*Math.PI);
+  } else if(mode==='melt'){
+    var cyc3=modeT%3.6;
+    if(cyc3<1.0) targetMelt=cyc3/1.0;
+    else if(cyc3<2.2){ targetMelt=1; eyeStyle='dizzy'; }
+    else if(cyc3<2.5){ targetMelt=0; targetSquash=1.3; }
+    else targetMelt=0;
+  }
+  if(mode!=='attack') attackAmt*=Math.pow(0.0018,dt);
+  var stiff=1-meltA*0.75;
+  var s1=spring(squash,squashV,targetSquash,120*stiff,11,dt); squash=s1[0];squashV=s1[1];
+  var s2=spring(wob,wobV,targetWob,60,7,dt); wob=s2[0];wobV=s2[1];
+  var s4=spring(meltA,meltV,targetMelt,40,9,dt); meltA=s4[0];meltV=s4[1];
+  for(var i=0;i<N;i++){
+    var t=i/(N-1);
+    var target= wob*(0.25+t*1.15) + meltA*Math.sin(i*2.7+elapsed*1.3)*2.4;
+    var k=(210-(t*130))*stiff, c=13-(t*4.5);
+    var sr=spring(ox[i],ov[i],target,k,c,dt); ox[i]=sr[0];ov[i]=sr[1];
+  }
+  blink-=dt; if(blink<-2.6-Math.random()*2) blink=0.13;
+  draw();
+  requestAnimationFrame(frame);
+}
+function drawIsland(){
+  var z, p;
+  for(z=8;z>=1;z--){
+    p=w2s(0,0,0);
+    discPlain(p.x,p.y+z*1.7,37-z*0.9,COL.dirt,z%2?1:2);
+  }
+  p=w2s(0,0,0);
+  disc(p.x,p.y,37,theta,COL.grass,2,true);
+  [[17,12],[-25,5],[7,-21],[-12,20],[25,-10]].forEach(function(f,i){
+    var q=w2s(f[0],f[1],0.4);
+    setPx(Math.round(q.x),Math.round(q.y),i%2?COL.flower:COL.flower2);
+  });
+}
+function drawTree(wx,wy){
+  var z,p;
+  for(z=0;z<4;z++){ p=w2s(wx,wy,z); discPlain(p.x,p.y,1.7,COL.trunk,1); }
+  var prof=[2.2,4.4,5.8,6.2,5.2,3.4,1.6];
+  for(z=0;z<prof.length;z++){ p=w2s(wx,wy,4+z*0.95); disc(p.x,p.y,prof[z],theta,COL.grass,2,true); }
+}
+function drawRock(wx,wy){
+  var prof=[3.4,2.8,1.8],z,p;
+  for(z=0;z<3;z++){ p=w2s(wx,wy,z*0.9); disc(p.x,p.y,prof[z],theta,COL.rock,1,true); }
+}
+function drawCrystal(wx,wy){
+  var prof=[1.9,1.7,1.4,1.0,0.6],z,p;
+  for(z=0;z<5;z++){ p=w2s(wx,wy,z*0.95); discPlain(p.x,p.y,prof[z],COL.crystal,z<3?1:2); }
+}
+function drawSlime(){
+  var base=w2s(slimeW.x,slimeW.y,0);
+  discPlain(base.x,base.y+1,R0*0.8*(2-squash)*0.55+2,[COL.shadow],0);
+  var spacing=LH*squash*(1-meltA*0.72);
+  var widthScale=Math.max(0.4,(2-squash))*(1+meltA*0.55);
+  var fx=-Math.sin(theta), fy=Math.cos(theta)*TILT;
+  var fl=Math.sqrt(fx*fx+fy*fy); fx/=fl; fy/=fl;
+  var centers=[];
+  for(var i=0;i<N;i++){
+    var t=i/(N-1);
+    var r=R0*profile(t)*Math.sqrt(Math.max(0.35,widthScale));
+    var p=w2s(slimeW.x,slimeW.y,i*spacing+hopLift);
+    var shift=gauss(t,0.55,0.30)*attackAmt;
+    var cxp=p.x+ox[i]*0.4+fx*shift, cyp=p.y+fy*shift;
+    centers.push({x:cxp,y:cyp,r:r,t:t});
+    disc(cxp,cyp,r,theta,COL.slime,t<0.22?1:t<0.55?2:t<0.85?3:4,false);
+  }
+  var vis=Math.cos(theta);
+  var fc=centers[Math.floor(0.58*(N-1))];
+  var faceR=fc.r*0.92;
+  var cxp=fc.x+fx*faceR, cyp=fc.y+fy*faceR;
+  if(vis>0.25){
+    var pxv=Math.cos(theta), pyv=Math.sin(theta)*TILT;
+    var pl=Math.sqrt(pxv*pxv+pyv*pyv); pxv/=pl; pyv/=pl;
+    var spread=2.6*Math.max(0.35,vis);
+    function fpx(dx,dy,c){ setPx(Math.round(cxp+pxv*dx),Math.round(cyp+pyv*dx+dy),c); }
+    if(eyeStyle==='dizzy'){
+      fpx(-spread-1,0,COL.ink); fpx(-spread,0,COL.ink); fpx(-spread+1,0,COL.ink);
+      fpx(spread-1,0,COL.ink); fpx(spread,0,COL.ink); fpx(spread+1,0,COL.ink);
+      fpx(-1,3,COL.ink); fpx(0,4,COL.ink); fpx(1,3,COL.ink);
+    } else if(blink>0){
+      fpx(-spread-1,1,COL.ink); fpx(-spread,1,COL.ink); fpx(-spread+1,1,COL.ink);
+      fpx(spread-1,1,COL.ink); fpx(spread,1,COL.ink); fpx(spread+1,1,COL.ink);
+      fpx(-1,3,COL.ink); fpx(0,3,COL.ink); fpx(1,3,COL.ink);
+    } else {
+      [-spread,spread].forEach(function(dx){
+        fpx(dx,-1,COL.ink); fpx(dx+1,-1,COL.ink); fpx(dx,0,COL.ink); fpx(dx+1,0,COL.ink); fpx(dx,1,COL.ink); fpx(dx+1,1,COL.ink);
+      });
+      fpx(-1,3,COL.ink); fpx(0,3,COL.ink); fpx(1,3,COL.ink);
+    }
+  } else if(vis<-0.25){
+    // 後ろ向き: 顔なし
+  } else {
+    setPx(Math.round(cxp),Math.round(cyp),COL.ink);
+    setPx(Math.round(cxp),Math.round(cyp+1),COL.ink);
+  }
+}
+function draw(){
+  fillAll(COL.bg);
+  var gy=Math.round(IC.y+34);
+  for(var y=gy;y<PH;y++) for(var x=0;x<PW;x++) buf[y*PW+x]=COL.ground;
+  drawIsland();
+  var items=[
+    {d:w2s(-21,-10,0).depth, f:function(){drawTree(-21,-10);}},
+    {d:w2s(13,-18,0).depth, f:function(){drawCrystal(13,-18);}},
+    {d:w2s(2,8,0).depth, f:function(){drawSlime();}},
+    {d:w2s(23,10,0).depth, f:function(){drawRock(23,10);}}
+  ];
+  items.sort(function(a,b){return a.d-b.d;});
+  items.forEach(function(it){it.f();});
+  if(outlineMode==='silhouette') applySilhouette();
+  else if(outlineMode==='edge') applyEdge();
+  o.putImageData(img,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(off,0,0,W,H);
+  ctx.fillStyle='rgba(220,235,255,0.85)'; ctx.font='bold 13px system-ui';
+  var deg=Math.round(((theta*180/Math.PI)%360+360)%360);
+  ctx.fillText(LABELS[mode]+' ／ '+MODE_JA[outlineMode]+' ／ 回転 '+deg+'°',14,26);
+}
+// ドラッグ回転＋タップでつぶす
+var dragging=false,dragX=0,moved=0;
+cv.addEventListener('pointerdown',function(e){
+  dragging=true; moved=0; dragX=e.clientX; cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove',function(e){
+  if(!dragging) return;
+  var dx=e.clientX-dragX; dragX=e.clientX; moved+=Math.abs(dx);
+  theta+=dx*0.008; rotVel=dx*0.008*60;
+});
+cv.addEventListener('pointerup',function(e){
+  dragging=false;
+  if(moved<6){ squashV-=7; wobV+=50; }
+});
+// UI
+var descEl=document.getElementById('olDesc');
+function setMode(m){
+  outlineMode=m;
+  document.querySelectorAll('#olMethods .btn').forEach(function(b){ b.classList.toggle('on',b.getAttribute('data-m')===m); });
+  descEl.innerHTML=DESC[m];
+}
+document.querySelectorAll('#olMethods .btn').forEach(function(b){
+  b.addEventListener('click',function(){ setMode(b.getAttribute('data-m')); });
+});
+var thickEl=document.getElementById('olThick'), thickVal=document.getElementById('olThickVal');
+thickEl.addEventListener('input',function(){
+  olThick=parseInt(thickEl.value,10);
+  thickVal.textContent=olThick+'px';
+});
+var actBtns=document.querySelectorAll('.btn[data-act]');
+actBtns.forEach(function(b){ b.addEventListener('click',function(){
+  mode=b.getAttribute('data-act'); modeT=0; auto=false; autoT=0;
+  actBtns.forEach(function(x){x.classList.toggle('on',x===b);});
+});});
+document.getElementById('olRot').addEventListener('click',function(){
+  autoRot=!autoRot;
+  this.textContent='自動回転: '+(autoRot?'ON':'OFF');
+  this.classList.toggle('on',autoRot);
+});
+document.getElementById('olRot').classList.add('on');
+setMode('none');
+requestAnimationFrame(function(n){last=n;requestAnimationFrame(frame);});
+})();
+</script>
+</body>
+</html>

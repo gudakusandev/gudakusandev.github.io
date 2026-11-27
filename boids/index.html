@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ボイズ — 群れシミュレーション実験</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#0b1526; font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; }
+  #cv { position:fixed; inset:0; display:block; touch-action:none; cursor:crosshair; }
+  .panel {
+    position:fixed; left:12px; top:12px; z-index:10;
+    background:rgba(8,17,34,.72); border:1px solid rgba(110,200,255,.25);
+    border-radius:10px; padding:10px 12px; color:#cfeaff; font-size:12px;
+    backdrop-filter:blur(4px); min-width:196px; user-select:none;
+  }
+  .panel h1 { font-size:13px; font-weight:700; letter-spacing:.08em; color:#eaf7ff; margin-bottom:2px; }
+  .panel .sub { font-size:10.5px; color:#7fa8c9; margin-bottom:8px; line-height:1.5; }
+  .row { display:flex; align-items:center; gap:6px; margin:5px 0; }
+  .row label { width:44px; color:#9fd0f5; font-size:11px; }
+  .row input[type=range] { flex:1; accent-color:#39c2ff; height:14px; }
+  .row .val { width:30px; text-align:right; color:#eaf7ff; font-variant-numeric:tabular-nums; }
+  .seg { display:flex; gap:6px; margin:8px 0 4px; }
+  .seg button {
+    flex:1; padding:5px 0; border-radius:6px; cursor:pointer; font-size:11.5px;
+    background:rgba(57,194,255,.08); color:#9fd0f5; border:1px solid rgba(110,200,255,.3);
+  }
+  .seg button.on { background:rgba(57,194,255,.32); color:#fff; border-color:#39c2ff; }
+  .stats { margin-top:7px; padding-top:7px; border-top:1px solid rgba(110,200,255,.18); color:#7fa8c9; font-size:11px; font-variant-numeric:tabular-nums; line-height:1.6; }
+  .stats b { color:#eaf7ff; font-weight:600; }
+  .hint { position:fixed; right:12px; bottom:10px; z-index:10; color:rgba(160,205,240,.55); font-size:11px; text-align:right; line-height:1.6; pointer-events:none; }
+  .foodbtn { margin-top:6px; width:100%; padding:5px 0; border-radius:6px; cursor:pointer; font-size:11.5px;
+    background:rgba(255,205,90,.10); color:#ffd98a; border:1px solid rgba(255,205,90,.35); }
+  .foodbtn.on { background:rgba(255,205,90,.30); color:#fff; border-color:#ffcd5a; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div class="panel">
+  <h1>ボイズ — 群れの実験</h1>
+  <div class="sub">分離・整列・結合の3ルールだけで、群れの動きが生まれる。</div>
+  <div class="row"><label>分離</label><input id="wSep" type="range" min="0" max="3" step="0.05" value="1.25"><span class="val" id="vSep">1.25</span></div>
+  <div class="row"><label>整列</label><input id="wAli" type="range" min="0" max="3" step="0.05" value="1.00"><span class="val" id="vAli">1.00</span></div>
+  <div class="row"><label>結合</label><input id="wCoh" type="range" min="0" max="3" step="0.05" value="0.85"><span class="val" id="vCoh">0.85</span></div>
+  <div class="row"><label>個体数</label><input id="nSlider" type="range" min="100" max="1000" step="50" value="600"><span class="val" id="vN">600</span></div>
+  <div class="seg">
+    <button id="modeAttract" class="on">集まる</button>
+    <button id="modeRepel">逃げる</button>
+  </div>
+  <button class="foodbtn" id="foodMode">餌を置く: OFF</button>
+  <div class="stats">
+    個体数 <b id="stN">600</b> ／ <b id="stFps">60</b> fps<br>
+    平均速度 <b id="stSpd">0.0</b> px/f
+  </div>
+</div>
+
+<div class="hint">ポインタを動かすと群れが反応する<br>「餌を置く」ONでクリック／タップした場所に収束点</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.floor(W * DPR); cv.height = Math.floor(H * DPR);
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintBase();
+  }
+
+  // ---- parameters ----
+  const P = {
+    n: 600,
+    perceiveR: 46,          // neighbor radius
+    separateR: 24,          // separation radius
+    maxSpeed: 3.4,
+    minSpeed: 1.6,
+    maxForce: 0.09,
+    wSep: 1.25, wAli: 1.00, wCoh: 0.85,
+    pointerForce: 0.55,     // attract/repel strength
+    pointerR: 210,          // pointer influence radius
+    foodForce: 0.85,
+  };
+
+  // ---- boids (typed arrays) ----
+  const MAX = 1000;
+  const px = new Float32Array(MAX), py = new Float32Array(MAX);
+  const vx = new Float32Array(MAX), vy = new Float32Array(MAX);
+  let n = 0;
+
+  function spawn(i) {
+    px[i] = Math.random() * W; py[i] = Math.random() * H;
+    const a = Math.random() * Math.PI * 2, s = 1.8 + Math.random() * 1.4;
+    vx[i] = Math.cos(a) * s; vy[i] = Math.sin(a) * s;
+  }
+  function setCount(m) {
+    m = Math.max(0, Math.min(MAX, m));
+    while (n < m) { spawn(n); n++; }
+    n = m;
+  }
+
+  // ---- spatial grid ----
+  const CELL = P.perceiveR;
+  let cols = 0, rows = 0, cellStart = null, cellEntries = null;
+  function buildGrid() {
+    cols = Math.max(1, Math.ceil(W / CELL));
+    rows = Math.max(1, Math.ceil(H / CELL));
+    const total = cols * rows;
+    if (!cellStart || cellStart.length !== total + 1) {
+      cellStart = new Int32Array(total + 1);
+      cellEntries = new Int32Array(MAX);
+    } else {
+      cellStart.fill(0);
+    }
+    for (let i = 0; i < n; i++) {
+      let cx = (px[i] / CELL) | 0, cy = (py[i] / CELL) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+      cellStart[cy * cols + cx + 1]++;
+    }
+    for (let c = 0; c < total; c++) cellStart[c + 1] += cellStart[c];
+    const cursor = cellStart.slice(0, total);
+    for (let i = 0; i < n; i++) {
+      let cx = (px[i] / CELL) | 0, cy = (py[i] / CELL) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+      cellEntries[cursor[cy * cols + cx]++] = i;
+    }
+  }
+
+  // ---- pointer / food ----
+  const pointer = { x: -9999, y: -9999, active: false, mode: 'attract' };
+  const foods = []; // {x, y, life}
+  let foodMode = false;
+
+  function limit(x, y, max) {
+    const m2 = x * x + y * y;
+    if (m2 > max * max && m2 > 0) { const m = Math.sqrt(m2); return [x / m * max, y / m * max]; }
+    return [x, y];
+  }
+
+  function step() {
+    buildGrid();
+    const pr2 = P.perceiveR * P.perceiveR;
+    const sr2 = P.separateR * P.separateR;
+    const ptrR2 = P.pointerR * P.pointerR;
+
+    for (let i = 0; i < n; i++) {
+      const x = px[i], y = py[i];
+      let cx = (x / CELL) | 0, cy = (y / CELL) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+
+      let cnt = 0;
+      let aliX = 0, aliY = 0;         // alignment: avg velocity
+      let cohX = 0, cohY = 0;         // cohesion: avg position
+      let sepX = 0, sepY = 0;         // separation: weighted push
+
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        if (gy < 0 || gy >= rows) continue;
+        for (let gx = cx - 1; gx <= cx + 1; gx++) {
+          if (gx < 0 || gx >= cols) continue;
+          const cell = gy * cols + gx;
+          for (let k = cellStart[cell]; k < cellStart[cell + 1]; k++) {
+            const j = cellEntries[k];
+            if (j === i) continue;
+            let dx = px[j] - x, dy = py[j] - y;
+            // wrap-aware distance
+            if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+            if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+            const d2 = dx * dx + dy * dy;
+            if (d2 > pr2 || d2 === 0) continue;
+            cnt++;
+            aliX += vx[j]; aliY += vy[j];
+            cohX += dx; cohY += dy;
+            if (d2 < sr2) { const inv = 1 / d2; sepX -= dx * inv; sepY -= dy * inv; }
+          }
+        }
+      }
+
+      let ax = 0, ay = 0;
+      if (cnt > 0) {
+        // alignment: steer toward average heading
+        let s = limit(aliX / cnt, aliY / cnt, P.maxSpeed);
+        let fx = s[0] - vx[i], fy = s[1] - vy[i];
+        let f = limit(fx, fy, P.maxForce);
+        ax += f[0] * P.wAli; ay += f[1] * P.wAli;
+        // cohesion: steer toward center of neighbors (relative offset avg)
+        s = limit(cohX / cnt, cohY / cnt, P.maxSpeed);
+        fx = s[0] - vx[i]; fy = s[1] - vy[i];
+        f = limit(fx, fy, P.maxForce);
+        ax += f[0] * P.wCoh; ay += f[1] * P.wCoh;
+        // separation
+        f = limit(sepX, sepY, P.maxForce);
+        ax += f[0] * P.wSep; ay += f[1] * P.wSep;
+      }
+
+      // pointer interaction: attract -> swirl toward pointer, repel -> scatter
+      if (pointer.active) {
+        let dx = pointer.x - x, dy = pointer.y - y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < ptrR2 && d2 > 1) {
+          const d = Math.sqrt(d2);
+          const fall = 1 - d / P.pointerR;
+          if (pointer.mode === 'attract') {
+            // inward pull + tangential swirl = vortex following
+            const tx = -dy / d, ty = dx / d;
+            ax += (dx / d * 0.9 + tx * 0.8) * P.pointerForce * fall;
+            ay += (dy / d * 0.9 + ty * 0.8) * P.pointerForce * fall;
+          } else {
+            ax += (-dx / d) * P.pointerForce * 1.6 * fall;
+            ay += (-dy / d) * P.pointerForce * 1.6 * fall;
+          }
+        }
+      }
+
+      // food convergence points
+      for (let fi = 0; fi < foods.length; fi++) {
+        const fd = foods[fi];
+        let dx = fd.x - x, dy = fd.y - y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > 4) {
+          const d = Math.sqrt(d2);
+          const pull = Math.min(1, 160 / d) * P.foodForce;
+          // approach but orbit when close, so the flock gathers and swirls
+          const tx = -dy / d, ty = dx / d;
+          const orbit = d < 60 ? 0.9 : 0.15;
+          ax += (dx / d * (1 - orbit) + tx * orbit) * pull * 0.06;
+          ay += (dy / d * (1 - orbit) + ty * orbit) * pull * 0.06;
+        }
+      }
+
+      vx[i] += ax; vy[i] += ay;
+
+      // clamp speed
+      const sp2 = vx[i] * vx[i] + vy[i] * vy[i];
+      if (sp2 > P.maxSpeed * P.maxSpeed) {
+        const m = Math.sqrt(sp2); vx[i] = vx[i] / m * P.maxSpeed; vy[i] = vy[i] / m * P.maxSpeed;
+      } else if (sp2 < P.minSpeed * P.minSpeed && sp2 > 0) {
+        const m = Math.sqrt(sp2); vx[i] = vx[i] / m * P.minSpeed; vy[i] = vy[i] / m * P.minSpeed;
+      }
+
+      px[i] += vx[i]; py[i] += vy[i];
+      if (px[i] < 0) px[i] += W; else if (px[i] >= W) px[i] -= W;
+      if (py[i] < 0) py[i] += H; else if (py[i] >= H) py[i] -= H;
+    }
+
+    for (let fi = foods.length - 1; fi >= 0; fi--) {
+      foods[fi].life -= 1 / 60;
+      if (foods[fi].life <= 0) foods.splice(fi, 1);
+    }
+  }
+
+  // ---- rendering ----
+  let bgGrad = null;
+  function paintBase() {
+    bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#0d1b33');
+    bgGrad.addColorStop(0.55, '#0b1526');
+    bgGrad.addColorStop(1, '#060d1a');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function speedColor(sp) {
+    // slow: deep cyan (0,140,190) -> fast: near white (230,250,255)
+    const t = Math.max(0, Math.min(1, (sp - P.minSpeed) / (P.maxSpeed - P.minSpeed)));
+    const r = Math.round(30 + 200 * t);
+    const g = Math.round(165 + 85 * t);
+    const b = Math.round(215 + 40 * t);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  function draw() {
+    // trails: fade previous frame with translucent deep-sea color
+    ctx.fillStyle = 'rgba(8,16,30,0.30)';
+    ctx.fillRect(0, 0, W, H);
+
+    // food markers
+    for (const fd of foods) {
+      const a = Math.max(0, Math.min(1, fd.life / 2));
+      ctx.strokeStyle = 'rgba(255,205,90,' + (0.75 * a) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(fd.x, fd.y, 10 + 3 * Math.sin(performance.now() / 180), 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,205,90,' + (0.9 * a) + ')';
+      ctx.beginPath(); ctx.arc(fd.x, fd.y, 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // boids as heading-oriented triangles, bucketed by color band for fewer state changes
+    const BANDS = 6;
+    for (let b = 0; b < BANDS; b++) {
+      const spMid = P.minSpeed + (P.maxSpeed - P.minSpeed) * (b + 0.5) / BANDS;
+      ctx.fillStyle = speedColor(spMid);
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
+        const band = Math.min(BANDS - 1, Math.max(0, ((sp - P.minSpeed) / (P.maxSpeed - P.minSpeed) * BANDS) | 0));
+        if (band !== b) continue;
+        const ux = vx[i] / (sp || 1), uy = vy[i] / (sp || 1);
+        const L = 7.5, Wd = 3.0;
+        const tipX = px[i] + ux * L, tipY = py[i] + uy * L;
+        const bx = px[i] - ux * L * 0.55, by = py[i] - uy * L * 0.55;
+        const ox = -uy * Wd, oy = ux * Wd;
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(bx + ox, by + oy);
+        ctx.lineTo(bx - ox, by - oy);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+  }
+
+  // ---- main loop / stats ----
+  const stN = document.getElementById('stN');
+  const stFps = document.getElementById('stFps');
+  const stSpd = document.getElementById('stSpd');
+  let frames = 0, lastStat = performance.now(), fps = 60;
+
+  function loop(now) {
+    step();
+    draw();
+    frames++;
+    if (now - lastStat >= 500) {
+      fps = Math.round(frames * 1000 / (now - lastStat));
+      frames = 0; lastStat = now;
+      let s = 0;
+      for (let i = 0; i < n; i++) s += Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
+      stN.textContent = n;
+      stFps.textContent = fps;
+      stSpd.textContent = n ? (s / n).toFixed(1) : '0.0';
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ---- input ----
+  function setPointer(e) {
+    const r = cv.getBoundingClientRect();
+    pointer.x = e.clientX - r.left; pointer.y = e.clientY - r.top;
+    pointer.active = true;
+  }
+  cv.addEventListener('pointermove', setPointer);
+  cv.addEventListener('pointerdown', (e) => {
+    setPointer(e);
+    if (foodMode) {
+      foods.push({ x: pointer.x, y: pointer.y, life: 14 });
+      if (foods.length > 5) foods.shift();
+    }
+  });
+  cv.addEventListener('pointerleave', () => { pointer.active = false; });
+  cv.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch') pointer.active = false; });
+
+  // ---- UI wiring ----
+  const bind = (id, vid, key, fmt) => {
+    const el = document.getElementById(id), v = document.getElementById(vid);
+    el.addEventListener('input', () => { P[key] = parseFloat(el.value); v.textContent = fmt(P[key]); });
+  };
+  bind('wSep', 'vSep', 'wSep', x => x.toFixed(2));
+  bind('wAli', 'vAli', 'wAli', x => x.toFixed(2));
+  bind('wCoh', 'vCoh', 'wCoh', x => x.toFixed(2));
+
+  const nSlider = document.getElementById('nSlider'), vN = document.getElementById('vN');
+  nSlider.addEventListener('input', () => { vN.textContent = nSlider.value; setCount(parseInt(nSlider.value, 10)); });
+
+  const bA = document.getElementById('modeAttract'), bR = document.getElementById('modeRepel');
+  bA.addEventListener('click', () => { pointer.mode = 'attract'; bA.classList.add('on'); bR.classList.remove('on'); });
+  bR.addEventListener('click', () => { pointer.mode = 'repel'; bR.classList.add('on'); bA.classList.remove('on'); });
+
+  const foodBtn = document.getElementById('foodMode');
+  foodBtn.addEventListener('click', () => {
+    foodMode = !foodMode;
+    foodBtn.textContent = '餌を置く: ' + (foodMode ? 'ON' : 'OFF');
+    foodBtn.classList.toggle('on', foodMode);
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  setCount(P.n);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
