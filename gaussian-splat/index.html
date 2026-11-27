@@ -493,8 +493,8 @@ gl.disable(gl.DEPTH_TEST);
 gl.clearColor(0, 0, 0, 0);
 
 /* ================= カメラ・ソート・描画 ================= */
-var cam = { az: 0.6, el: 0.62, rad: 10.8, tAz: 0.6, tEl: 0.62, tRad: 10.8 };
-var TARGET = [0, -0.6, 0];
+var cam = { az: 0.6, el: 0.80, rad: 11.0, tAz: 0.6, tEl: 0.80, tRad: 11.0 };
+var TARGET = [0, -0.5, 0];
 var indices = new Array(COUNT);
 for(var ii=0; ii<COUNT; ii++) indices[ii] = ii;
 var depths = new Float32Array(COUNT);
@@ -583,7 +583,7 @@ cv.addEventListener('pointermove', function(e){
   pointers.set(e.pointerId, [e.clientX, e.clientY]);
   if(pointers.size === 1){
     cam.tAz -= dx * 0.007;
-    cam.tEl = Math.max(-0.12, Math.min(1.25, cam.tEl + dy * 0.005));
+    cam.tEl = Math.max(-0.35, Math.min(1.35, cam.tEl - dy * 0.005));
   } else if(pointers.size === 2){
     var ps = Array.from(pointers.values());
     var d = Math.hypot(ps[0][0]-ps[1][0], ps[0][1]-ps[1][1]);
