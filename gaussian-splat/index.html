@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>実験 #004 ガウシアンスプラッティング ― 写真を「色の滲み」で描き直す</title><style>:root{--hatch-widget-text:#f1f3f5;--hatch-widget-muted:#adb5bd;--hatch-widget-border:#3a4152;--hatch-widget-surface:#171f30;--hatch-widget-surface-muted:#1d2639;--hatch-widget-accent:#ffd94d;--hatch-widget-on-accent:#191104}body{background:#101623;margin:0;padding:18px 14px 28px;font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;color:#eef2f7}.hd{max-width:720px;margin:0 auto 12px}.hd h1{font-size:20px;margin:0 0 6px}.hd p{color:#9fb0c3;font-size:13px;line-height:1.7;margin:0}.back{max-width:720px;margin:14px auto 0;font-size:13px}.back a{color:#ffd94d}.algo{max-width:720px;margin:22px auto 0;background:#171f30;border:1px solid #3a4152;border-radius:14px;padding:18px 20px}
+.algo h2{font-size:17px;margin:0 0 10px;color:#ffd94d}
+.algo h3{font-size:14px;margin:16px 0 6px;color:#eef2f7}
+.algo p,.algo li{color:#c3cedd;font-size:13px;line-height:1.8}
+.algo ul{margin:4px 0 8px;padding-left:18px}
+.algo code{background:#1d2639;border:1px solid #3a4152;border-radius:5px;padding:0 5px;font-size:12px;color:#ffd94d}
+.algo .fig{background:#101623;border:1px solid #3a4152;border-radius:10px;padding:10px 12px;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.7;color:#9fb0c3;white-space:pre;overflow-x:auto}
+</style></head><body>
+<div class="hd"><h1>実験 #004 ガウシアンスプラッティング ― 写真を「色の滲み」で描き直す</h1><p>3Dの世界で話題の Gaussian Splatting を2Dで作ってみる。画像を、点でも四角いピクセルでもなく、色のついた楕円の「滲み」（スプラット）を何千個も重ねて再構成する。スプラットは誤差の大きい場所から自動で置かれていくので、眺めていると「大まかな色面→細部」の順に絵が浮かび上がる。</p></div>
+<div id="gsRoot" style="font-family:system-ui,-apple-system,'Hiragino Sans',sans-serif;color:var(--hatch-widget-text);max-width:720px;margin:0 auto">
+<style>
+  #gsRoot .gs-wrap{background:var(--hatch-widget-surface);border:1px solid var(--hatch-widget-border);border-radius:14px;padding:14px}
+  #gsRoot .gs-stage{display:flex;gap:12px;flex-wrap:wrap}
+  #gsRoot figure{flex:1 1 250px;margin:0}
+  #gsRoot figure canvas{width:100%;height:auto;display:block;border-radius:10px;background:#0e1420}
+  #gsRoot figcaption{font-size:12px;color:var(--hatch-widget-muted);margin-top:6px;text-align:center}
+  #gsRoot .gs-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
+  #gsRoot .gs-btn{flex:1 1 18%;min-width:104px;padding:9px 4px;border-radius:10px;border:1px solid var(--hatch-widget-border);background:var(--hatch-widget-surface-muted);color:var(--hatch-widget-text);font-size:12.5px;font-weight:700;cursor:pointer}
+  #gsRoot .gs-btn.on{background:var(--hatch-widget-accent);color:var(--hatch-widget-on-accent);border-color:var(--hatch-widget-accent)}
+  #gsRoot .gs-note{font-size:12px;color:var(--hatch-widget-muted);line-height:1.7;margin-top:10px}
+  #gsRoot .gs-stat{font-size:13px;line-height:1.8;margin-top:10px}
+  #gsRoot .gs-stat b{color:var(--hatch-widget-accent);font-variant-numeric:tabular-nums}
+  #gsRoot input[type=range]{flex:1 1 200px;accent-color:var(--hatch-widget-accent);height:28px}
+  #gsRoot .gs-slider-label{font-size:12.5px;color:var(--hatch-widget-text);white-space:nowrap}
+  #gsRoot #gsGraph{width:100%;height:auto;display:block;margin-top:8px;background:#0e1420;border-radius:8px}
+  #gsRoot .gs-dec{margin-top:14px;background:var(--hatch-widget-surface-muted);border:1px solid var(--hatch-widget-border);border-radius:12px;padding:12px;display:none}
+  #gsRoot .gs-dec.open{display:block}
+  #gsRoot .gs-dec-flex{display:flex;gap:14px;flex-wrap:wrap}
+  #gsRoot .gs-dec-flex canvas{background:#0e1420;border-radius:8px;max-width:100%;height:auto}
+  #gsRoot .gs-dec-info{flex:1 1 180px;font-size:12.5px;line-height:1.9;color:var(--hatch-widget-text)}
+  #gsRoot .gs-swatch{display:inline-block;width:14px;height:14px;border-radius:4px;border:1px solid var(--hatch-widget-border);vertical-align:-2px;margin-right:6px}
+</style>
+<div class="gs-wrap">
+  <div class="gs-stage">
+    <figure>
+      <canvas id="gsMain" width="400" height="400"></canvas>
+      <figcaption>スプラットで再構成した絵</figcaption>
+    </figure>
+    <figure id="gsTargetFig" style="display:none">
+      <canvas id="gsTarget" width="400" height="400"></canvas>
+      <figcaption>ターゲット（正解の絵）</figcaption>
+    </figure>
+  </div>
+  <div class="gs-row">
+    <button class="gs-btn on" id="gsPlay">⏸ 一時停止</button>
+    <button class="gs-btn" id="gsReset">最初からやり直す</button>
+    <button class="gs-btn" id="gsCompare">ターゲットと並べる</button>
+    <button class="gs-btn" id="gsOne">1個のスプラットを見る</button>
+  </div>
+  <div class="gs-row">
+    <span class="gs-slider-label">表示するスプラット数</span>
+    <input type="range" id="gsSlider" min="0" max="0" value="0" step="1">
+    <span class="gs-slider-label" id="gsSliderVal">0 個</span>
+  </div>
+  <div class="gs-stat" id="gsStat">準備中…</div>
+  <canvas id="gsGraph" width="660" height="56"></canvas>
+  <div class="gs-dec" id="gsDec">
+    <div class="gs-dec-flex">
+      <div>
+        <canvas id="gsDecCv" width="340" height="230"></canvas>
+        <canvas id="gsDecFall" width="340" height="70" style="margin-top:8px"></canvas>
+      </div>
+      <div class="gs-dec-info" id="gsDecInfo"></div>
+    </div>
+    <div class="gs-row">
+      <button class="gs-btn" id="gsPick">ランダムに別の1個を選ぶ</button>
+    </div>
+    <div class="gs-note">上がスプラット1個の拡大図（黄色い楕円が輪郭、十字が長軸・短軸、中心から離れるほど薄くなる）。下は中心を通る断面の「濃さ」の実測カーブ。これがガウシアン減衰で、点でもベタ塗りの楕円でもなく「滲み」である理由。</div>
+  </div>
+  <div class="gs-note">実験 #004 ― 2Dガウシアンスプラッティング。各スプラットは「位置・楕円の長軸と短軸・回転・色・不透明度」を持ち、ガウシアン減衰で描いて重ねる。フィッティングは、現在の絵とターゲットの誤差マップを計算し、誤差の大きい場所を優先的に選んで次のスプラットを置く貪欲法。色は「今その場所に描かれている色」との差分を埋めるよう補正して決める（ターゲットの色をそのまま置くと、重ねるたびに薄まって収束しない）。序盤は大きなスプラットで色面を、中盤以降は小さいスプラットで輪郭と細部を埋める。スライダーを戻すと「最初の K 個だけ」でどこまで再現できるか比べられる。</div>
+</div>
+<script>
+(function(){
+"use strict";
+var root=document.getElementById('gsRoot');
+var S=400, MAX=12000, G=72, BATCH=42;
+var mainCv=root.querySelector('#gsMain'), mctx=mainCv.getContext('2d');
+var targetCv=root.querySelector('#gsTarget'), tctx=targetCv.getContext('2d',{willReadFrequently:true});
+var graphCv=root.querySelector('#gsGraph'), gctx=graphCv.getContext('2d');
+var statEl=root.querySelector('#gsStat');
+var slider=root.querySelector('#gsSlider'), sliderVal=root.querySelector('#gsSliderVal');
+var playBtn=root.querySelector('#gsPlay');
+
+/* ===== 決定的乱数（ターゲット絵の生成用） ===== */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function lerp(a,b,t){return a+(b-a)*t;}
+function mix(c1,c2,t){return [Math.round(lerp(c1[0],c2[0],t)),Math.round(lerp(c1[1],c2[1],t)),Math.round(lerp(c1[2],c2[2],t))];}
+function rgba(c,a){return 'rgba('+c[0]+','+c[1]+','+c[2]+','+a+')';}
+
+/* ===== ターゲット絵：夕景の湖とスライム（手続き描画） ===== */
+var HY=248; /* 地平線 */
+function drawScene(){
+  var c=tctx, rng=mulberry32(20261127);
+  /* 空 */
+  var sky=c.createLinearGradient(0,0,0,HY);
+  sky.addColorStop(0,'#1b2340'); sky.addColorStop(0.34,'#4a3566');
+  sky.addColorStop(0.58,'#9a4a6e'); sky.addColorStop(0.8,'#e0703c');
+  sky.addColorStop(1,'#f7a84b');
+  c.fillStyle=sky; c.fillRect(0,0,S,HY+1);
+  /* 星 */
+  for(var i=0;i<80;i++){
+    var sx=rng()*S, sy=rng()*150, sa=(1-sy/170)*0.75*rng();
+    if(sa<=0.03) continue;
+    c.fillStyle='rgba(255,246,220,'+sa.toFixed(3)+')';
+    c.fillRect(sx,sy,rng()<0.2?2:1.3,rng()<0.2?2:1.3);
+  }
+  /* 太陽のグローと本体 */
+  var glow=c.createRadialGradient(262,238,0,262,238,120);
+  glow.addColorStop(0,'rgba(255,186,92,0.55)'); glow.addColorStop(1,'rgba(255,186,92,0)');
+  c.fillStyle=glow; c.fillRect(142,118,240,240);
+  var sun=c.createRadialGradient(262,232,2,262,238,36);
+  sun.addColorStop(0,'#fff6cf'); sun.addColorStop(0.55,'#ffd873'); sun.addColorStop(1,'#ff9e45');
+  c.fillStyle=sun; c.beginPath(); c.arc(262,238,34,0,Math.PI*2); c.fill();
+  /* 雲（楕円の重なり、上面が夕日に染まる） */
+  function cloud(cx,cy,scale,seed){
+    var r2=mulberry32(seed);
+    for(var j=0;j<5;j++){
+      var ex=cx+(r2()-0.5)*64*scale, ey=cy+(r2()-0.5)*8*scale;
+      var rx=(24+r2()*30)*scale, ry=(6.5+r2()*5)*scale;
+      var g=c.createRadialGradient(ex,ey-ry*0.4,1,ex,ey,rx);
+      g.addColorStop(0,'rgba(255,203,148,0.85)');
+      g.addColorStop(0.6,'rgba(214,120,110,0.55)');
+      g.addColorStop(1,'rgba(122,74,110,0)');
+      c.save(); c.translate(ex,ey); c.scale(1,ry/rx); c.translate(-ex,-ey);
+      c.fillStyle=g; c.beginPath(); c.arc(ex,ey,rx,0,Math.PI*2); c.fill(); c.restore();
+    }
+  }
+  cloud(70,64,1.0,11); cloud(215,42,0.8,23); cloud(322,94,1.15,37);
+  cloud(118,122,0.9,41); cloud(298,152,0.7,53); cloud(52,168,0.65,67);
+  /* 鳥 */
+  c.strokeStyle='rgba(24,18,44,0.8)'; c.lineWidth=1.8; c.lineCap='round';
+  function bird(bx,by,bs){ c.beginPath(); c.moveTo(bx-bs,by); c.quadraticCurveTo(bx-bs*0.4,by-bs*0.7,bx,by); c.quadraticCurveTo(bx+bs*0.4,by-bs*0.7,bx+bs,by); c.stroke(); }
+  bird(92,82,7); bird(118,96,5.5); bird(140,74,4.5);
+  /* 遠くの山並み */
+  function ridge(baseY,minH,maxH,seed){
+    var r3=mulberry32(seed), pts=[], x=-10;
+    pts.push([-10,baseY]);
+    while(x<S+10){ var h=minH+r3()*(maxH-minH); pts.push([x,baseY-h]); x+=18+r3()*30; }
+    pts.push([S+10,baseY]); return pts;
+  }
+  function pathOf(pts){ c.beginPath(); c.moveTo(pts[0][0],pts[0][1]); for(var k=1;k<pts.length;k++) c.lineTo(pts[k][0],pts[k][1]); c.closePath(); }
+  var farPts=ridge(HY,38,102,101);
+  var mg=c.createLinearGradient(0,120,0,HY);
+  mg.addColorStop(0,'#7a5f9e'); mg.addColorStop(1,'#4a3566');
+  pathOf(farPts); c.fillStyle=mg; c.fill();
+  /* 山の湖面反射（先に描く） */
+  c.save(); c.globalAlpha=0.16; c.fillStyle='#4a3566';
+  c.beginPath(); c.moveTo(farPts[0][0],HY);
+  for(var k2=1;k2<farPts.length-1;k2++) c.lineTo(farPts[k2][0],HY+(HY-farPts[k2][1])*0.42);
+  c.lineTo(S+10,HY); c.closePath(); c.fill(); c.restore();
+  /* 近くの山（左右） */
+  pathOf([[-10,HY],[-10,196],[38,182],[84,206],[128,190],[176,222],[232,HY]]); c.fillStyle='#2c2148'; c.fill();
+  pathOf([[410,HY],[410,208],[368,196],[330,220],[292,214],[262,HY]]); c.fillStyle='#342657'; c.fill();
+  /* 地平線の霞 */
+  var haze=c.createLinearGradient(0,HY-16,0,HY+10);
+  haze.addColorStop(0,'rgba(255,190,120,0)'); haze.addColorStop(0.6,'rgba(255,190,120,0.20)'); haze.addColorStop(1,'rgba(255,190,120,0)');
+  c.fillStyle=haze; c.fillRect(0,HY-16,S,26);
+  /* 湖面 */
+  var wat=c.createLinearGradient(0,HY,0,S);
+  wat.addColorStop(0,'#59355e'); wat.addColorStop(0.25,'#3c2a55'); wat.addColorStop(1,'#171233');
+  c.fillStyle=wat; c.fillRect(0,HY,S,S-HY);
+  /* 太陽の反射の柱 */
+  for(var q=0;q<30;q++){
+    var fy=HY+5+q*5.1, fw=56*(1-q/34)*(0.55+rng()*0.75), fx=262+(rng()-0.5)*16;
+    c.fillStyle=rgba(mix([255,170,80],[255,120,60],q/30),(0.30*(1-q/32)+0.04).toFixed(3));
+    c.beginPath(); c.ellipse(fx,fy,fw/2,1.5,0,0,Math.PI*2); c.fill();
+  }
+  /* 水面のきらめき */
+  for(var w=0;w<110;w++){
+    var wx=rng()*S, wy=HY+6+rng()*(S-HY-12), wl=3+rng()*13;
+    c.fillStyle='rgba(255,220,170,'+(0.04+rng()*0.10).toFixed(3)+')';
+    c.fillRect(wx,wy,wl,1.1);
+  }
+  /* 小島 */
+  c.fillStyle='rgba(8,10,22,0.35)';
+  c.beginPath(); c.ellipse(196,384,124,10,0,0,Math.PI*2); c.fill();
+  var isl=c.createLinearGradient(0,338,0,388);
+  isl.addColorStop(0,'#265c3a'); isl.addColorStop(0.35,'#173d27'); isl.addColorStop(1,'#0d2417');
+  c.fillStyle='#0d2417'; c.beginPath(); c.ellipse(196,372,122,27,0,0,Math.PI*2); c.fill();
+  c.fillStyle=isl; c.beginPath(); c.ellipse(196,364,120,24,0,0,Math.PI*2); c.fill();
+  /* 小さな松 */
+  function pine(px,py,ph){
+    c.fillStyle='#4a2e17'; c.fillRect(px-1.6,py-ph*0.22,3.2,ph*0.22);
+    c.fillStyle='#0f3524';
+    for(var t=0;t<3;t++){ var tw=ph*0.30*(1-t*0.22), ty=py-ph*0.16-t*ph*0.24;
+      c.beginPath(); c.moveTo(px-tw,ty); c.lineTo(px,ty-ph*0.34); c.lineTo(px+tw,ty); c.closePath(); c.fill(); }
+  }
+  pine(112,356,44); pine(292,362,32);
+  /* 草の穂と花 */
+  c.strokeStyle='#3f9e5f'; c.lineWidth=1.3;
+  for(var gI=0;gI<26;gI++){
+    var gx=92+rng()*208, gy=352+rng()*16;
+    c.beginPath(); c.moveTo(gx,gy); c.quadraticCurveTo(gx+2,gy-5,gx+4+rng()*3,gy-7-rng()*3); c.stroke();
+  }
+  var flowerCols=['#ffb7cd','#ffe066','#ffffff'];
+  for(var fI=0;fI<14;fI++){
+    c.fillStyle=flowerCols[fI%3];
+    c.beginPath(); c.arc(100+rng()*192,354+rng()*14,1.6,0,Math.PI*2); c.fill();
+  }
+  /* スライム */
+  c.fillStyle='rgba(6,20,14,0.32)';
+  c.beginPath(); c.ellipse(196,356,38,6.5,0,0,Math.PI*2); c.fill();
+  var body=c.createLinearGradient(0,296,0,356);
+  body.addColorStop(0,'#93f2d2'); body.addColorStop(0.5,'#37c48f'); body.addColorStop(1,'#157354');
+  c.fillStyle=body;
+  c.beginPath();
+  c.moveTo(160,356);
+  c.bezierCurveTo(158,318,172,296,196,296);
+  c.bezierCurveTo(220,296,234,318,232,356);
+  c.closePath(); c.fill();
+  c.fillStyle='rgba(255,255,255,0.20)';
+  c.beginPath(); c.ellipse(196,344,26,9,0,0,Math.PI*2); c.fill();
+  c.save(); c.translate(177,313); c.rotate(-0.5);
+  c.fillStyle='rgba(255,255,255,0.65)';
+  c.beginPath(); c.ellipse(0,0,10,5.4,0,0,Math.PI*2); c.fill(); c.restore();
+  c.fillStyle='rgba(255,255,255,0.8)';
+  c.beginPath(); c.arc(214,308,3,0,Math.PI*2); c.fill();
+  c.fillStyle='#12362a';
+  c.beginPath(); c.ellipse(183,333,3.4,5.2,0,0,Math.PI*2); c.fill();
+  c.beginPath(); c.ellipse(209,333,3.4,5.2,0,0,Math.PI*2); c.fill();
+  c.fillStyle='#ffffff';
+  c.beginPath(); c.arc(184.2,331,1.3,0,Math.PI*2); c.fill();
+  c.beginPath(); c.arc(210.2,331,1.3,0,Math.PI*2); c.fill();
+  c.strokeStyle='#12362a'; c.lineWidth=1.7;
+  c.beginPath(); c.arc(196,338,5.5,0.25,Math.PI-0.25); c.stroke();
+  c.fillStyle='rgba(255,140,160,0.5)';
+  c.beginPath(); c.ellipse(168,340,5.4,3.1,0,0,Math.PI*2); c.fill();
+  c.beginPath(); c.ellipse(224,340,5.4,3.1,0,0,Math.PI*2); c.fill();
+  /* ビネット */
+  var vg=c.createRadialGradient(200,200,140,200,200,300);
+  vg.addColorStop(0,'rgba(10,8,24,0)'); vg.addColorStop(1,'rgba(10,8,24,0.36)');
+  c.fillStyle=vg; c.fillRect(0,0,S,S);
+}
+drawScene();
+var targetData=tctx.getImageData(0,0,S,S).data;
+
+/* ターゲットの平均色（フィッティングの初期背景） */
+var avg=[0,0,0];
+for(var ai=0;ai<S*S;ai++){ avg[0]+=targetData[ai*4]; avg[1]+=targetData[ai*4+1]; avg[2]+=targetData[ai*4+2]; }
+avg=[Math.round(avg[0]/(S*S)),Math.round(avg[1]/(S*S)),Math.round(avg[2]/(S*S))];
+var BG='rgb('+avg[0]+','+avg[1]+','+avg[2]+')';
+
+/* 低解像度ターゲット（誤差マップ用） */
+var smallCv=document.createElement('canvas'); smallCv.width=G; smallCv.height=G;
+var smx=smallCv.getContext('2d',{willReadFrequently:true});
+smx.drawImage(targetCv,0,0,G,G);
+var targetSmall=smx.getImageData(0,0,G,G).data;
+var errMap=new Float32Array(G*G), cumMap=new Float32Array(G*G);
+var curSmall=null; /* 直近の誤差計算時点の「現在の絵」（低解像度） */
+
+/* ===== ガウシアンスプライト（色ごとにキャッシュ） ===== */
+var SPR=96, spriteCache=new Map();
+function spriteFor(r,g,b){
+  var key=((r>>3)<<10)|((g>>3)<<5)|(b>>3);
+  var sp=spriteCache.get(key);
+  if(sp) return sp;
+  if(spriteCache.size>700){ var firstKey=spriteCache.keys().next().value; spriteCache.delete(firstKey); }
+  sp=document.createElement('canvas'); sp.width=SPR; sp.height=SPR;
+  var c=sp.getContext('2d');
+  c.fillStyle='rgb('+(((r>>3)<<3))+','+(((g>>3)<<3))+','+(((b>>3)<<3))+')';
+  c.fillRect(0,0,SPR,SPR);
+  var gr=c.createRadialGradient(SPR/2,SPR/2,0,SPR/2,SPR/2,SPR/2);
+  gr.addColorStop(0,'rgba(0,0,0,0)');
+  gr.addColorStop(0.3,'rgba(0,0,0,0.33)');
+  gr.addColorStop(0.55,'rgba(0,0,0,0.74)');
+  gr.addColorStop(0.8,'rgba(0,0,0,0.94)');
+  gr.addColorStop(1,'rgba(0,0,0,1)');
+  c.globalCompositeOperation='destination-out';
+  c.fillStyle=gr; c.fillRect(0,0,SPR,SPR);
+  spriteCache.set(key,sp);
+  return sp;
+}
+function drawSplat(c,s){
+  var sp=spriteFor(s.r,s.g,s.b);
+  c.save(); c.translate(s.x,s.y); c.rotate(s.rot);
+  c.globalAlpha=s.alpha;
+  c.drawImage(sp,-s.ra,-s.rb,s.ra*2,s.rb*2);
+  c.restore();
+}
+
+/* ===== 増分描画用キャンバスと状態 ===== */
+var acc=document.createElement('canvas'); acc.width=S; acc.height=S;
+var actx=acc.getContext('2d');
+var viewCv=document.createElement('canvas'); viewCv.width=S; viewCv.height=S;
+var vctx=viewCv.getContext('2d');
+var splats=[], mseHistory=[], lastRMSE=0;
+var playing=true, follow=true, viewK=0;
+
+function fillBg(c){ c.fillStyle=BG; c.fillRect(0,0,S,S); }
+function computeError(){
+  smx.drawImage(acc,0,0,G,G);
+  var d=smx.getImageData(0,0,G,G).data;
+  curSmall=d;
+  var tot=0, mse=0;
+  for(var i=0;i<G*G;i++){
+    var dr=d[i*4]-targetSmall[i*4], dg=d[i*4+1]-targetSmall[i*4+1], db=d[i*4+2]-targetSmall[i*4+2];
+    var e=(Math.abs(dr)+Math.abs(dg)+Math.abs(db))/3;
+    errMap[i]=e; mse+=dr*dr+dg*dg+db*db;
+    tot+=Math.pow(e,1.35)+0.02; cumMap[i]=tot;
+  }
+  lastRMSE=Math.sqrt(mse/(G*G*3));
+}
+function samplePos(){
+  var tot=cumMap[G*G-1], v=Math.random()*tot, lo=0, hi=G*G-1;
+  while(lo<hi){ var mid=(lo+hi)>>1; if(cumMap[mid]<v) lo=mid+1; else hi=mid; }
+  var cx=lo%G, cy=(lo/G)|0;
+  return [(cx+Math.random())/G*S,(cy+Math.random())/G*S];
+}
+function addBatch(){
+  if(splats.length>=MAX) return;
+  computeError();
+  mseHistory.push({n:splats.length,rmse:lastRMSE});
+  var p=splats.length/MAX;
+  var sigma=24*Math.pow(2.1/24,p);
+  var ALPHA=0.55, IA=1-ALPHA;
+  for(var i=0;i<BATCH && splats.length<MAX;i++){
+    var pos=samplePos(), x=pos[0], y=pos[1];
+    var xi=Math.min(S-1,Math.max(0,x|0)), yi=Math.min(S-1,Math.max(0,y|0));
+    var ti=(yi*S+xi)*4;
+    /* 色は「今その場所に描かれている色」との差分を埋めるよう補正する。
+       補正なし（ターゲットの色をそのまま置く）だと、重ねるたびに薄まって収束が鈍る。 */
+    var cell=(Math.min(G-1,(y/S*G)|0)*G+Math.min(G-1,(x/S*G)|0))*4;
+    var cr=(targetData[ti]-IA*curSmall[cell])/ALPHA;
+    var cg=(targetData[ti+1]-IA*curSmall[cell+1])/ALPHA;
+    var cb=(targetData[ti+2]-IA*curSmall[cell+2])/ALPHA;
+    var s={x:x,y:y,
+      ra:3*sigma*(0.7+Math.random()*0.6),
+      rb:3*sigma*(0.7+Math.random()*0.6),
+      rot:Math.random()*Math.PI,
+      r:Math.max(0,Math.min(255,Math.round(cr))),
+      g:Math.max(0,Math.min(255,Math.round(cg))),
+      b:Math.max(0,Math.min(255,Math.round(cb))),
+      alpha:ALPHA};
+    splats.push(s); drawSplat(actx,s);
+  }
+  afterAdd();
+}
+function afterAdd(){
+  slider.max=splats.length;
+  if(follow){ slider.value=splats.length; viewK=splats.length; }
+  sliderVal.textContent=(follow?splats.length:viewK)+' 個 / 保持 '+splats.length+' 個';
+  updateStats(); drawGraph(); renderDisplay();
+}
+function updateStats(){
+  var done=splats.length>=MAX;
+  statEl.innerHTML='スプラット <b>'+splats.length.toLocaleString()+'</b> / '+MAX.toLocaleString()+' 個'+
+    '　色の誤差 RMSE <b>'+lastRMSE.toFixed(1)+'</b>（0で完全一致）'+
+    '　状態：<b>'+(done?'完了':(playing?'フィッティング中':'一時停止'))+'</b>';
+  if(done){ playing=false; playBtn.textContent='完了'; playBtn.classList.remove('on'); }
+}
+function drawGraph(){
+  var W=graphCv.width,H=graphCv.height;
+  gctx.clearRect(0,0,W,H);
+  gctx.fillStyle='#0e1420'; gctx.fillRect(0,0,W,H);
+  if(mseHistory.length<2) return;
+  var hi=Math.log10(Math.max(60,mseHistory[0].rmse)), lo=Math.log10(8);
+  gctx.strokeStyle='#ffd94d'; gctx.lineWidth=1.6; gctx.beginPath();
+  for(var i=0;i<mseHistory.length;i++){
+    var px=i/(MAX/BATCH)*W;
+    var py=H-4-((Math.log10(Math.max(8,mseHistory[i].rmse))-lo)/(hi-lo))*(H-10);
+    if(i===0) gctx.moveTo(px,py); else gctx.lineTo(px,py);
+  }
+  gctx.stroke();
+  gctx.fillStyle='#9fb0c3'; gctx.font='10px sans-serif';
+  gctx.fillText('誤差 RMSE の推移（対数軸）',6,12);
+}
+function renderDisplay(){
+  mctx.clearRect(0,0,S,S);
+  if(follow) mctx.drawImage(acc,0,0);
+  else mctx.drawImage(viewCv,0,0);
+}
+var redrawTimer=null;
+function redrawView(){
+  fillBg(vctx);
+  for(var i=0;i<viewK;i++) drawSplat(vctx,splats[i]);
+  renderDisplay();
+}
+slider.addEventListener('input',function(){
+  viewK=+slider.value;
+  follow=viewK>=splats.length;
+  sliderVal.textContent=viewK+' 個 / 保持 '+splats.length+' 個';
+  if(follow){ renderDisplay(); return; }
+  if(redrawTimer) clearTimeout(redrawTimer);
+  redrawTimer=setTimeout(redrawView,90);
+});
+playBtn.addEventListener('click',function(){
+  if(splats.length>=MAX) return;
+  playing=!playing;
+  playBtn.textContent=playing?'⏸ 一時停止':'▶ 再生';
+  playBtn.classList.toggle('on',playing);
+  updateStats();
+});
+root.querySelector('#gsReset').addEventListener('click',function(){
+  splats=[]; mseHistory=[]; spriteCache.clear();
+  fillBg(actx); fillBg(vctx);
+  follow=true; viewK=0; playing=true;
+  playBtn.textContent='⏸ 一時停止'; playBtn.classList.add('on');
+  computeError(); mseHistory.push({n:0,rmse:lastRMSE});
+  slider.max=0; slider.value=0;
+  sliderVal.textContent='0 個 / 保持 0 個';
+  updateStats(); drawGraph(); renderDisplay();
+});
+var cmpOn=false;
+root.querySelector('#gsCompare').addEventListener('click',function(){
+  cmpOn=!cmpOn;
+  root.querySelector('#gsTargetFig').style.display=cmpOn?'block':'none';
+  this.classList.toggle('on',cmpOn);
+  this.textContent=cmpOn?'並べるのをやめる':'ターゲットと並べる';
+});
+
+/* ===== 1個のスプラット分解ビュー ===== */
+var decPanel=root.querySelector('#gsDec');
+var decCv=root.querySelector('#gsDecCv'), dctx=decCv.getContext('2d');
+var fallCv=root.querySelector('#gsDecFall'), fctx=fallCv.getContext('2d');
+var decInfo=root.querySelector('#gsDecInfo');
+var decSplat=null;
+function pickSplat(){
+  if(splats.length>0) decSplat=splats[(Math.random()*splats.length)|0];
+  else decSplat={x:200,y:190,ra:64,rb:30,rot:-0.42,r:255,g:170,b:90,alpha:0.55};
+  drawDec();
+}
+function drawDec(){
+  var s=decSplat, W=decCv.width, H=decCv.height, cx=120, cy=112;
+  dctx.clearRect(0,0,W,H);
+  dctx.fillStyle='#0e1420'; dctx.fillRect(0,0,W,H);
+  dctx.strokeStyle='rgba(90,110,150,0.25)'; dctx.lineWidth=1;
+  for(var gx=0;gx<=W;gx+=20){ dctx.beginPath(); dctx.moveTo(gx,0); dctx.lineTo(gx,H); dctx.stroke(); }
+  for(var gy=0;gy<=H;gy+=20){ dctx.beginPath(); dctx.moveTo(0,gy); dctx.lineTo(W,gy); dctx.stroke(); }
+  var f=120/Math.max(s.ra,s.rb);
+  var A=s.ra*f, B=s.rb*f;
+  var sp=spriteFor(s.r,s.g,s.b);
+  dctx.save(); dctx.translate(cx,cy); dctx.rotate(s.rot); dctx.globalAlpha=s.alpha;
+  dctx.drawImage(sp,-A,-B,A*2,B*2); dctx.restore();
+  dctx.save(); dctx.translate(cx,cy); dctx.rotate(s.rot);
+  dctx.strokeStyle='#ffd94d'; dctx.lineWidth=1.6;
+  dctx.beginPath(); dctx.ellipse(0,0,A,B,0,0,Math.PI*2); dctx.stroke();
+  dctx.strokeStyle='#7ee2ff'; dctx.beginPath(); dctx.moveTo(-A,0); dctx.lineTo(A,0); dctx.stroke();
+  dctx.strokeStyle='#ff9db0'; dctx.beginPath(); dctx.moveTo(0,-B); dctx.lineTo(0,B); dctx.stroke();
+  dctx.fillStyle='#ffffff'; dctx.beginPath(); dctx.arc(0,0,3,0,Math.PI*2); dctx.fill();
+  dctx.restore();
+  dctx.strokeStyle='#9fb0c3'; dctx.lineWidth=1.2;
+  dctx.beginPath(); dctx.moveTo(cx,cy); dctx.lineTo(cx+34,cy); dctx.stroke();
+  dctx.beginPath(); dctx.arc(cx,cy,26,-s.rot,0,s.rot>0); dctx.stroke();
+  dctx.fillStyle='#eef2f7'; dctx.font='11px sans-serif';
+  dctx.fillText('長軸',cx+A*0.45,cy-8);
+  dctx.fillText('短軸',cx+6,cy-B*0.55);
+  dctx.fillText('回転 θ',cx+38,cy-6);
+  dctx.fillText('中心',cx+6,cy+14);
+  /* 減衰の実測カーブ（スプライト中心行のアルファ） */
+  var sd=sp.getContext('2d').getImageData(0,SPR/2,SPR,1).data;
+  var FW=fallCv.width, FH=fallCv.height;
+  fctx.clearRect(0,0,FW,FH);
+  fctx.fillStyle='#0e1420'; fctx.fillRect(0,0,FW,FH);
+  fctx.strokeStyle='rgba(90,110,150,0.4)';
+  fctx.beginPath(); fctx.moveTo(30,FH-16); fctx.lineTo(FW-8,FH-16); fctx.stroke();
+  fctx.beginPath(); fctx.moveTo(30,6); fctx.lineTo(30,FH-16); fctx.stroke();
+  fctx.strokeStyle='#ffd94d'; fctx.lineWidth=1.8; fctx.beginPath();
+  for(var px=SPR/2;px<SPR;px++){
+    var a=sd[px*4+3]/255*s.alpha;
+    var X=30+(px-SPR/2)/(SPR/2)*(FW-46), Y=FH-16-a*(FH-26);
+    if(px===SPR/2) fctx.moveTo(X,Y); else fctx.lineTo(X,Y);
+  }
+  fctx.stroke();
+  fctx.fillStyle='#9fb0c3'; fctx.font='10px sans-serif';
+  fctx.fillText('濃さ',4,14); fctx.fillText('中心',28,FH-3); fctx.fillText('縁（3σ）',FW-52,FH-3);
+  var deg=(s.rot*180/Math.PI).toFixed(0);
+  decInfo.innerHTML=
+    '<span class="gs-swatch" style="background:rgb('+s.r+','+s.g+','+s.b+')"></span>色 rgb('+s.r+', '+s.g+', '+s.b+')<br>'+
+    '長軸 2a：<b>'+(s.ra*2).toFixed(1)+' px</b>／短軸 2b：<b>'+(s.rb*2).toFixed(1)+' px</b><br>'+
+    '回転 θ：<b>'+deg+'°</b><br>'+
+    '不透明度：<b>'+s.alpha.toFixed(2)+'</b><br>'+
+    '位置：<b>('+s.x.toFixed(0)+', '+s.y.toFixed(0)+')</b>（400×400 の絵の中）<br>'+
+    '<span style="color:var(--hatch-widget-muted)">楕円の大きさは反復の進み具合で変わる。序盤の大きい1個は色面を、中盤以降の小さい1個は輪郭を担当する。</span>';
+}
+root.querySelector('#gsOne').addEventListener('click',function(){
+  var open=decPanel.classList.toggle('open');
+  this.classList.toggle('on',open);
+  if(open && !decSplat) pickSplat();
+  else if(open) drawDec();
+});
+root.querySelector('#gsPick').addEventListener('click',pickSplat);
+
+/* ===== メインループ ===== */
+function frame(){
+  if(playing && splats.length<MAX) addBatch();
+  requestAnimationFrame(frame);
+}
+fillBg(actx); fillBg(vctx);
+computeError(); mseHistory.push({n:0,rmse:lastRMSE});
+updateStats(); drawGraph(); renderDisplay();
+requestAnimationFrame(frame);
+
+/* 検証用ハンドル */
+window.__gs={get splats(){return splats;},get mseHistory(){return mseHistory;},
+  getRMSE:function(){return lastRMSE;},
+  step:function(batches){ for(var i=0;i<batches;i++) addBatch(); },
+  MAX:MAX};
+})();
+</script>
+</div>
+<div class="algo">
+<h2>作って分かったこと</h2>
+<h3>スプラットは「点」ではなく「滲み」</h3>
+<p>1個のスプラットは、中心が一番濃く、縁に向かってガウシアン減衰で消えていく楕円のぼかし。ベタ塗りの楕円を重ねるのとは違い、重なった場所同士がなめらかに混ざる。「1個のスプラットを見る」で、軸・回転・減衰カーブを分解して確認できる。</p>
+<h3>フィッティングは「間違い直し」の繰り返し</h3>
+<p>このデモのフィッティングは貪欲法：現在の絵とターゲットを比べて誤差マップを作り、誤差の大きい場所に次のスプラットを置く。置く色も工夫が要るポイントで、ターゲットの色をそのまま置くと下の色と混ざって薄まり、いつまでも正解に届かない。「今の色との差分を埋める色」を計算して置くことで、1個ごとに中心がほぼ正解へ寄る。序盤は大きなスプラット（σ が大きい）で空や湖の大まかな色面を埋め、反復が進むとスプラットは小さくなり、山の稜線やスライムの輪郭といった細部を担当する。下の誤差グラフが右下がりになるのが「学習している」証拠。</p>
+<h3>3D版との違い</h3>
+<p>本物の3Dガウシアンスプラッティングは、3D空間の楕円体をカメラに投影して描き、勾配降下法で全スプラットを同時に最適化する。この2D版は投影が不要な代わりに、最適化を「誤差の大きい場所へ追加」という単純なルールに置き換えた。それでも核の部分――<code>ガウシアン減衰する楕円の重なりで画像を表す</code>――は同じで、数千個で写真らしい絵になる感覚は掴める。</p>
+</div>
+<div class="back"><a href="../">← 実験一覧へ戻る</a></div>
+</body></html>
