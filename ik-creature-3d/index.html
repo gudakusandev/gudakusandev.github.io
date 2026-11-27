@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>実験 #013 3D IKで歩く生き物 ― プロシージャルアニメーション</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#1a1626;
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;color:#f3ede2}
+  #app{position:fixed;inset:0}
+  canvas{display:block;touch-action:none}
+  .panel{position:fixed;left:14px;top:14px;z-index:5;max-width:min(430px,86vw);
+    background:rgba(16,14,28,.55);border:1px solid rgba(255,255,255,.14);border-radius:14px;
+    padding:12px 16px 13px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .panel .tag{display:inline-block;font-size:10.5px;letter-spacing:.08em;color:#ffd9a0;
+    border:1px solid rgba(255,217,160,.45);border-radius:999px;padding:2px 9px;margin-bottom:7px}
+  .panel h1{font-size:17px;margin:0 0 5px;font-weight:700}
+  .panel p{margin:0;font-size:12.5px;line-height:1.75;color:#ddd3c2}
+  .bar{position:fixed;left:14px;bottom:14px;z-index:5;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .bar button{appearance:none;border:1px solid rgba(255,255,255,.22);background:rgba(16,14,28,.6);
+    color:#f3ede2;border-radius:999px;padding:8px 15px;font-size:13px;cursor:pointer;
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .bar button.on{background:#ffd9a0;color:#2a1e10;border-color:#ffd9a0;font-weight:700}
+  .bar .hint{font-size:11.5px;color:rgba(243,237,226,.75);background:rgba(16,14,28,.45);
+    border-radius:999px;padding:7px 12px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  #noload{position:fixed;inset:0;z-index:20;display:none;align-items:center;justify-content:center;
+    background:#1a1626;text-align:center;padding:24px}
+  #noload .box{max-width:420px}
+  #noload h2{font-size:17px;margin:0 0 8px}
+  #noload p{font-size:13px;line-height:1.8;color:#cbbfa9;margin:0}
+  #loading{position:fixed;inset:0;z-index:15;display:flex;align-items:center;justify-content:center;
+    background:#1a1626;font-size:13.5px;color:#cbbfa9;letter-spacing:.12em}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="panel">
+  <span class="tag">Procedural Animation / 3D IK</span>
+  <h1>実験 #013 3D IKで歩く生き物</h1>
+  <p>夕景の小世界を、キーフレームなしで歩く四足の獣。脚は2ボーンIKで解き、着地点は「進む先＋地形の高さ」から手続き生成する。地面をタップするとそこへ歩いていく。</p>
+</div>
+
+<div class="bar">
+  <button id="skelBtn" type="button">骨格表示</button>
+  <span class="hint">ドラッグ：カメラ回転 ／ ホイール・ピンチ：ズーム ／ 地面タップ：移動先</span>
+</div>
+
+<div id="loading">読み込み中…</div>
+<div id="noload">
+  <div class="box">
+    <h2>3Dライブラリを読み込めませんでした</h2>
+    <p>three.js の CDN（cdn.jsdelivr.net）へ接続できない環境のようです。ネットワーク接続を確認して、再読み込みしてください。</p>
+  </div>
+</div>
+
+<script>
+  window.__ikBoot = false;
+  setTimeout(function(){
+    if(!window.__ikBoot){
+      document.getElementById('noload').style.display = 'flex';
+      var l = document.getElementById('loading');
+      if(l) l.style.display = 'none';
+    }
+  }, 8000);
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+window.__ikBoot = true;
+document.getElementById('loading').style.display = 'none';
+
+/* ============================================================
+   レンダラ / シーン / カメラ
+============================================================ */
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const HORIZON = new THREE.Color(0xf0a56e);
+scene.fog = new THREE.Fog(HORIZON.getHex(), 42, 125);
+
+const camera = new THREE.PerspectiveCamera(46, window.innerWidth/window.innerHeight, 0.1, 400);
+
+/* ============================================================
+   ライティング（夕景）
+============================================================ */
+const SUN_DIR = new THREE.Vector3(-0.55, 0.34, -0.42).normalize();
+const sun = new THREE.DirectionalLight(0xffbe82, 3.0);
+sun.position.copy(SUN_DIR).multiplyScalar(70);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -42; sun.shadow.camera.right = 42;
+sun.shadow.camera.top = 42;   sun.shadow.camera.bottom = -42;
+sun.shadow.camera.near = 20;  sun.shadow.camera.far = 160;
+sun.shadow.bias = -0.0006;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+scene.add(sun.target);
+
+const hemi = new THREE.HemisphereLight(0x8fa8cc, 0x5c4a38, 0.85);
+scene.add(hemi);
+const fill = new THREE.DirectionalLight(0x91a7ff, 0.35);
+fill.position.set(30, 24, 40);
+scene.add(fill);
+
+/* ============================================================
+   空（グラデーションシェーダドーム＋太陽グロー）
+============================================================ */
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  uniforms: {
+    topColor:     { value: new THREE.Color(0x3d5a8a) },
+    midColor:     { value: new THREE.Color(0xc97e63) },
+    horizonColor: { value: HORIZON.clone() },
+    sunDir:       { value: SUN_DIR.clone() },
+    sunColor:     { value: new THREE.Color(0xffd9a3) }
+  },
+  vertexShader: `
+    varying vec3 vDir;
+    void main(){
+      vDir = normalize(position);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec3 vDir;
+    uniform vec3 topColor, midColor, horizonColor, sunColor;
+    uniform vec3 sunDir;
+    void main(){
+      float h = clamp(vDir.y, -1.0, 1.0);
+      vec3 col = mix(horizonColor, midColor, smoothstep(0.0, 0.22, h));
+      col = mix(col, topColor, smoothstep(0.18, 0.65, h));
+      col = mix(vec3(0.23,0.20,0.27), col, smoothstep(-0.25, 0.005, h));
+      float s = max(dot(normalize(vDir), normalize(sunDir)), 0.0);
+      col += sunColor * pow(s, 220.0) * 1.4;
+      col += sunColor * pow(s, 10.0) * 0.30;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(220, 32, 18), skyMat));
+
+/* ============================================================
+   地形（ハイトフィールド）
+============================================================ */
+const WORLD_R = 32;           // 歩ける範囲の半径
+function heightAt(x, z){
+  let h = 0;
+  h += Math.sin(x*0.075 + 1.7) * Math.cos(z*0.062 + 0.4) * 1.7;
+  h += Math.sin(x*0.043 - 0.8) * Math.sin(z*0.088 + 2.1) * 1.35;
+  h += Math.sin((x + z)*0.16) * 0.35;
+  h += Math.sin(x*0.31) * Math.cos(z*0.27) * 0.16;
+  const r = Math.hypot(x, z);
+  const t = Math.max(0, r - WORLD_R);
+  h -= t * t * 0.055;                       // 縁はなだらかに沈む
+  h += Math.max(0, 10 - r) * 0.012;         // 中心はわずかに高く
+  return h;
+}
+const _n = new THREE.Vector3();
+function groundNormal(x, z, out){
+  const e = 0.55;
+  const hx = heightAt(x + e, z) - heightAt(x - e, z);
+  const hz = heightAt(x, z + e) - heightAt(x, z - e);
+  out.set(-hx/(2*e), 1, -hz/(2*e)).normalize();
+  return out;
+}
+
+{
+  const SIZE = 150, SEG = 150;
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+  geo.rotateX(-Math.PI/2);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const cGrass = new THREE.Color(0x69985c);
+  const cDry   = new THREE.Color(0xa8a06d);
+  const cRock  = new THREE.Color(0x8d8478);
+  const cLow   = new THREE.Color(0x51784a);
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++){
+    const x = pos.getX(i), z = pos.getZ(i);
+    const y = heightAt(x, z);
+    pos.setY(i, y);
+    groundNormal(x, z, _n);
+    const slope = 1 - _n.y;                                  // 0=平坦
+    const dryMix = THREE.MathUtils.clamp(0.5 + 0.28*Math.sin(x*0.21 + z*0.13) + (y - 0.4)*0.16, 0, 1);
+    c.copy(cGrass).lerp(cDry, dryMix * 0.55);
+    if (y < -0.6) c.lerp(cLow, Math.min(1, (-0.6 - y) * 0.35));
+    c.lerp(cRock, THREE.MathUtils.smoothstep(slope, 0.06, 0.30));
+    const jitter = 0.94 + 0.09 * Math.abs(Math.sin(x*12.9898 + z*78.233));
+    colors[i*3]   = c.r * jitter;
+    colors[i*3+1] = c.g * jitter;
+    colors[i*3+2] = c.b * jitter;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  const terrain = new THREE.Mesh(geo,
+    new THREE.MeshStandardMaterial({ vertexColors:true, roughness:1.0, metalness:0.0 }));
+  terrain.receiveShadow = true;
+  terrain.name = 'terrain';
+  scene.add(terrain);
+}
+
+/* ============================================================
+   植生・小物
+============================================================ */
+function rand(seedObj){
+  seedObj.s = (seedObj.s * 16807) % 2147483647;
+  return (seedObj.s - 1) / 2147483646;
+}
+const rng = { s: 1234567 };
+const trunkMat = new THREE.MeshStandardMaterial({ color:0x6e4f33, roughness:1 });
+const leafMats = [0x5d8148, 0x6d9153, 0x7fa45f, 0x527a44].map(c =>
+  new THREE.MeshStandardMaterial({ color:c, roughness:1 }));
+const rockMat = new THREE.MeshStandardMaterial({ color:0x8d8478, roughness:1, flatShading:true });
+const treePositions = [];
+
+function makeTree(x, z, s){
+  const g = new THREE.Group();
+  const y = heightAt(x, z);
+  const trunkH = 1.5 * s;
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.09*s, 0.16*s, trunkH, 6), trunkMat);
+  trunk.position.y = trunkH/2;
+  trunk.castShadow = true;
+  g.add(trunk);
+  const lm = leafMats[Math.floor(rand(rng) * leafMats.length)];
+  const blobs = 3 + Math.floor(rand(rng) * 2);
+  for (let i = 0; i < blobs; i++){
+    const r = (0.75 - i*0.13) * s;
+    const b = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), lm);
+    b.position.set((rand(rng)-0.5)*0.7*s, trunkH + 0.55*s + i*0.5*s, (rand(rng)-0.5)*0.7*s);
+    b.castShadow = true;
+    g.add(b);
+  }
+  g.position.set(x, y - 0.05, z);
+  g.rotation.y = rand(rng) * Math.PI * 2;
+  scene.add(g);
+  treePositions.push(new THREE.Vector3(x, y, z));
+}
+for (let i = 0; i < 26; i++){
+  const a = rand(rng) * Math.PI * 2;
+  const r = 7 + rand(rng) * (WORLD_R - 6);
+  makeTree(Math.cos(a)*r, Math.sin(a)*r, 0.8 + rand(rng)*0.9);
+}
+for (let i = 0; i < 15; i++){
+  const a = rand(rng) * Math.PI * 2;
+  const r = 4 + rand(rng) * (WORLD_R - 2);
+  const x = Math.cos(a)*r, z = Math.sin(a)*r;
+  const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.3 + rand(rng)*0.55, 0), rockMat);
+  rock.position.set(x, heightAt(x, z) + 0.08, z);
+  rock.rotation.set(rand(rng)*3, rand(rng)*3, rand(rng)*3);
+  rock.scale.y = 0.65;
+  rock.castShadow = true; rock.receiveShadow = true;
+  scene.add(rock);
+}
+/* 草の房（インスタンシング） */
+{
+  const N = 260;
+  const tuft = new THREE.InstancedMesh(
+    new THREE.ConeGeometry(0.09, 0.34, 5),
+    new THREE.MeshStandardMaterial({ color:0x59854c, roughness:1 }), N);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+  const p = new THREE.Vector3(), e = new THREE.Euler();
+  for (let i = 0; i < N; i++){
+    const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R + 2);
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    p.set(x, heightAt(x, z) + 0.13, z);
+    e.set((rand(rng)-0.5)*0.35, rand(rng)*Math.PI, (rand(rng)-0.5)*0.35);
+    q.setFromEuler(e);
+    const s = 0.7 + rand(rng)*1.1;
+    sc.set(s, s*(0.8 + rand(rng)*0.7), s);
+    m.compose(p, q, sc);
+    tuft.setMatrixAt(i, m);
+  }
+  scene.add(tuft);
+}
+/* 花（インスタンシング、色つき） */
+{
+  const N = 130;
+  const flower = new THREE.InstancedMesh(
+    new THREE.IcosahedronGeometry(0.055, 0),
+    new THREE.MeshStandardMaterial({ roughness:0.6, emissiveIntensity:0.35 }), N);
+  const palette = [0xffb7c9, 0xfff3f0, 0xffd76e, 0xc9a7ff].map(c => new THREE.Color(c));
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(1,1,1);
+  const p = new THREE.Vector3();
+  for (let i = 0; i < N; i++){
+    const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R - 2);
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    p.set(x, heightAt(x, z) + 0.10 + rand(rng)*0.08, z);
+    m.compose(p, q, sc);
+    flower.setMatrixAt(i, m);
+    const col = palette[Math.floor(rand(rng) * palette.length)];
+    flower.setColorAt(i, col);
+  }
+  scene.add(flower);
+}
+/* 蛍／花粉の粒子 */
+let fireflies, fireflyBase;
+{
+  const N = 130;
+  fireflyBase = new Float32Array(N * 4); // x,z, phase, speed
+  const posArr = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    const a = rand(rng) * Math.PI * 2, r = Math.sqrt(rand(rng)) * (WORLD_R + 4);
+    fireflyBase[i*4]   = Math.cos(a) * r;
+    fireflyBase[i*4+1] = Math.sin(a) * r;
+    fireflyBase[i*4+2] = rand(rng) * Math.PI * 2;
+    fireflyBase[i*4+3] = 0.4 + rand(rng) * 0.8;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+  const cx = cv.getContext('2d');
+  const grad = cx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255,235,180,1)');
+  grad.addColorStop(0.35, 'rgba(255,205,120,0.55)');
+  grad.addColorStop(1, 'rgba(255,190,90,0)');
+  cx.fillStyle = grad; cx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(cv);
+  fireflies = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.55, map: tex, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, color: 0xffd98a, sizeAttenuation: true
+  }));
+  scene.add(fireflies);
+}
+
+/* ============================================================
+   生き物（四足獣）
+============================================================ */
+const furMat   = new THREE.MeshStandardMaterial({ color:0xf2e7d3, roughness:0.95 });
+const furMat2  = new THREE.MeshStandardMaterial({ color:0xe7d6b8, roughness:0.95 });
+const darkMat  = new THREE.MeshStandardMaterial({ color:0x4a3a28, roughness:0.8 });
+const antlerMat= new THREE.MeshStandardMaterial({ color:0xa9825a, roughness:0.9 });
+const pinkMat  = new THREE.MeshStandardMaterial({ color:0xe8a7a0, roughness:0.9 });
+
+function shadowed(mesh){ mesh.castShadow = true; return mesh; }
+
+const creature = {
+  pos: new THREE.Vector3(0, 0, 0),
+  heading: 0.6,
+  speed: 0,
+  gaitPhase: 0,
+  state: 'idle',
+  stateTime: 1.2,
+  target: new THREE.Vector3(6, 0, 4),
+  glance: 0, glanceTarget: 0, glanceTime: 2,
+  earFlick: 0, earFlickTime: 3
+};
+creature.pos.y = heightAt(0, 0);
+
+const body = new THREE.Group();
+scene.add(body);
+
+const torso = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.5, 24, 18), furMat));
+torso.scale.set(0.78, 0.82, 1.55);
+torso.position.set(0, 0.10, 0);
+body.add(torso);
+const chest = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.42, 20, 16), furMat));
+chest.position.set(0, 0.06, 0.42); chest.scale.set(0.85, 0.9, 1.0);
+body.add(chest);
+const rump = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.43, 20, 16), furMat));
+rump.position.set(0, 0.12, -0.42); rump.scale.set(0.88, 0.92, 1.0);
+body.add(rump);
+const belly = new THREE.Mesh(new THREE.SphereGeometry(0.42, 20, 14),
+  new THREE.MeshStandardMaterial({ color:0xfaf3e3, roughness:1 }));
+belly.position.set(0, -0.10, 0.02); belly.scale.set(0.72, 0.62, 1.35);
+body.add(belly);
+
+/* 首と頭 */
+const neck = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.21, 0.55, 10), furMat));
+neck.position.set(0, 0.34, 0.68);
+neck.rotation.x = 0.7;
+body.add(neck);
+
+const head = new THREE.Group();
+head.position.set(0, 0.58, 0.92);
+body.add(head);
+const skull = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.21, 20, 16), furMat));
+skull.scale.set(0.88, 0.95, 1.05);
+head.add(skull);
+const muzzle = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.115, 14, 12), furMat2));
+muzzle.position.set(0, -0.055, 0.17); muzzle.scale.set(0.9, 0.8, 1.5);
+head.add(muzzle);
+const nose = new THREE.Mesh(new THREE.SphereGeometry(0.038, 10, 8), darkMat);
+nose.position.set(0, -0.03, 0.335);
+head.add(nose);
+for (const sx of [-1, 1]){
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8),
+    new THREE.MeshStandardMaterial({ color:0x241a12, roughness:0.35 }));
+  eye.position.set(0.105 * sx, 0.045, 0.135);
+  head.add(eye);
+}
+const ears = [];
+for (const sx of [-1, 1]){
+  const earPivot = new THREE.Group();
+  earPivot.position.set(0.115 * sx, 0.16, -0.03);
+  const ear = shadowed(new THREE.Mesh(new THREE.ConeGeometry(0.068, 0.24, 8), furMat));
+  ear.position.y = 0.11;
+  earPivot.add(ear);
+  const inner = new THREE.Mesh(new THREE.ConeGeometry(0.038, 0.15, 8), pinkMat);
+  inner.position.set(0, 0.09, 0.022);
+  earPivot.add(inner);
+  earPivot.rotation.z = -0.38 * sx;
+  earPivot.rotation.x = -0.12;
+  head.add(earPivot);
+  ears.push(earPivot);
+  /* 小さな枝角 */
+  const antler = new THREE.Group();
+  antler.position.set(0.07 * sx, 0.19, -0.06);
+  const beam = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.024, 0.34, 6), antlerMat));
+  beam.position.y = 0.15;
+  antler.add(beam);
+  const branch = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.016, 0.17, 6), antlerMat));
+  branch.position.set(0.045 * sx, 0.22, 0.01);
+  branch.rotation.z = -0.7 * sx;
+  antler.add(branch);
+  antler.rotation.x = -0.35;
+  antler.rotation.z = -0.15 * sx;
+  head.add(antler);
+}
+
+/* 脚（メッシュはワールド空間で IK 配置） */
+const L1 = 0.58, L2 = 0.58;               // 大腿・脛の長さ
+const STAND_H = 1.04;                      // 股関節の高さの目安
+const legDefs = [
+  { name:'FL', hip:new THREE.Vector3(-0.24, -0.08,  0.50), front:true,  pair:0 },
+  { name:'HR', hip:new THREE.Vector3( 0.26, -0.06, -0.52), front:false, pair:0 },
+  { name:'FR', hip:new THREE.Vector3( 0.24, -0.08,  0.50), front:true,  pair:1 },
+  { name:'HL', hip:new THREE.Vector3(-0.26, -0.06, -0.52), front:false, pair:1 }
+];
+const legs = [];
+for (const def of legDefs){
+  const upper = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.082, 1, 10), furMat));
+  const lower = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.05, 1, 10), furMat2));
+  const knee  = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.062, 10, 8), furMat));
+  const foot  = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.062, 10, 8), darkMat));
+  foot.scale.set(1, 0.55, 1.35);
+  scene.add(upper, lower, knee, foot);
+  legs.push({
+    ...def,
+    upper, lower, kneeMesh: knee, footMesh: foot,
+    footPos: new THREE.Vector3(),
+    home: new THREE.Vector3(),
+    stepping: false, stepT: 0, stepDur: 0.26,
+    from: new THREE.Vector3(), to: new THREE.Vector3(),
+    kneePos: new THREE.Vector3()
+  });
+}
+/* 初期の足位置 */
+{
+  const fwd = new THREE.Vector3(Math.sin(creature.heading), 0, Math.cos(creature.heading));
+  const right = new THREE.Vector3(fwd.z, 0, -fwd.x);
+  for (const leg of legs){
+    leg.footPos.copy(creature.pos)
+      .addScaledVector(right, leg.hip.x)
+      .addScaledVector(fwd, leg.hip.z);
+    leg.footPos.y = heightAt(leg.footPos.x, leg.footPos.z);
+  }
+}
+
+/* 尻尾（遅延追従チェーン） */
+const TAIL_N = 6, TAIL_LEN = 0.16;
+const tailPts = [];
+for (let i = 0; i < TAIL_N; i++) tailPts.push(creature.pos.clone().add(new THREE.Vector3(0, 1.1, -0.8 - i*0.14)));
+const tailMeshes = [];
+for (let i = 0; i < TAIL_N; i++){
+  const r = 0.075 * (1 - i/(TAIL_N + 1)) + 0.02;
+  const seg = shadowed(new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), i % 2 ? furMat2 : furMat));
+  scene.add(seg);
+  tailMeshes.push(seg);
+}
+
+/* 骨格表示 */
+const skelGroup = new THREE.Group();
+skelGroup.visible = false;
+scene.add(skelGroup);
+const SKEL_PAIRS = 4 * 2 + 3;
+const skelPos = new Float32Array(SKEL_PAIRS * 2 * 3);
+const skelGeo = new THREE.BufferGeometry();
+skelGeo.setAttribute('position', new THREE.BufferAttribute(skelPos, 3));
+const skelLines = new THREE.LineSegments(skelGeo, new THREE.LineBasicMaterial({
+  color: 0x7df9ff, transparent: true, opacity: 0.95, depthTest: false }));
+skelLines.renderOrder = 99;
+skelGroup.add(skelLines);
+const jointMeshes = [], targetMeshes = [];
+for (let i = 0; i < 12; i++){
+  const j = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffe066, depthTest: false }));
+  j.renderOrder = 100;
+  skelGroup.add(j); jointMeshes.push(j);
+}
+for (let i = 0; i < 4; i++){
+  const t = new THREE.Mesh(new THREE.RingGeometry(0.09, 0.13, 20),
+    new THREE.MeshBasicMaterial({ color: 0xff8fa3, side: THREE.DoubleSide, depthTest: false }));
+  t.rotation.x = -Math.PI/2; t.renderOrder = 100;
+  skelGroup.add(t); targetMeshes.push(t);
+}
+document.getElementById('skelBtn').addEventListener('click', (ev) => {
+  skelGroup.visible = !skelGroup.visible;
+  ev.currentTarget.classList.toggle('on', skelGroup.visible);
+});
+
+/* ============================================================
+   IK（2ボーン、ポールベクトルつき）
+============================================================ */
+const _axis = new THREE.Vector3(), _perp = new THREE.Vector3(), _pole = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+function solveIK(hip, target, poleDir, kneeOut){
+  _axis.copy(target).sub(hip);
+  let d = _axis.length();
+  const maxD = (L1 + L2) * 0.999;
+  d = THREE.MathUtils.clamp(d, 0.1, maxD);
+  _axis.normalize();
+  const a = (L1*L1 - L2*L2 + d*d) / (2 * d);
+  const h = Math.sqrt(Math.max(L1*L1 - a*a, 0));
+  _pole.copy(poleDir);
+  _perp.copy(_pole).addScaledVector(_axis, -_pole.dot(_axis));
+  if (_perp.lengthSq() < 1e-6) _perp.set(0, 0, 1);
+  _perp.normalize();
+  kneeOut.copy(hip).addScaledVector(_axis, a).addScaledVector(_perp, h);
+}
+const _mid = new THREE.Vector3(), _dir = new THREE.Vector3();
+function placeBone(mesh, a, b){
+  _mid.copy(a).add(b).multiplyScalar(0.5);
+  mesh.position.copy(_mid);
+  _dir.copy(b).sub(a);
+  const len = Math.max(_dir.length(), 0.001);
+  mesh.quaternion.setFromUnitVectors(UP, _dir.normalize());
+  mesh.scale.set(1, len, 1);
+}
+
+/* ============================================================
+   入力（オービット＋地面タップで移動）
+============================================================ */
+let camAz = 0.9, camEl = 0.38, camDist = 9.5;
+let camAzT = camAz, camElT = camEl, camDistT = camDist;
+let lastInteract = -10;
+const pointers = new Map();
+let downInfo = null, pinchDist = 0;
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+
+function pickGround(clientX, clientY){
+  ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const o = raycaster.ray.origin, d = raycaster.ray.direction;
+  let t = 0, prevT = 0, prevDiff = o.y - heightAt(o.x, o.z);
+  const p = new THREE.Vector3();
+  for (let i = 0; i < 220; i++){
+    t += 0.35;
+    p.copy(o).addScaledVector(d, t);
+    const diff = p.y - heightAt(p.x, p.z);
+    if (diff <= 0 && prevDiff > 0){
+      let lo = prevT, hi = t;
+      for (let k = 0; k < 14; k++){
+        const mid = (lo + hi) / 2;
+        p.copy(o).addScaledVector(d, mid);
+        if (p.y - heightAt(p.x, p.z) > 0) lo = mid; else hi = mid;
+      }
+      p.copy(o).addScaledVector(d, (lo + hi) / 2);
+      return p;
+    }
+    prevDiff = diff; prevT = t;
+    if (t > 160) break;
+  }
+  return null;
+}
+
+const dom = renderer.domElement;
+dom.addEventListener('pointerdown', (ev) => {
+  dom.setPointerCapture(ev.pointerId);
+  pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (pointers.size === 1) downInfo = { x: ev.clientX, y: ev.clientY, time: performance.now(), moved: 0 };
+  if (pointers.size === 2){
+    const [p1, p2] = [...pointers.values()];
+    pinchDist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+  }
+  lastInteract = perfNow();
+});
+dom.addEventListener('pointermove', (ev) => {
+  if (!pointers.has(ev.pointerId)) return;
+  const prev = pointers.get(ev.pointerId);
+  const dx = ev.clientX - prev.x, dy = ev.clientY - prev.y;
+  pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  lastInteract = perfNow();
+  if (pointers.size === 1){
+    if (downInfo) downInfo.moved += Math.abs(dx) + Math.abs(dy);
+    camAzT -= dx * 0.0052;
+    camElT = THREE.MathUtils.clamp(camElT + dy * 0.004, 0.06, 1.25);
+  } else if (pointers.size === 2){
+    const [p1, p2] = [...pointers.values()];
+    const nd = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    if (pinchDist > 0) camDistT = THREE.MathUtils.clamp(camDistT * (pinchDist / nd), 4.5, 20);
+    pinchDist = nd;
+  }
+});
+function endPointer(ev){
+  pointers.delete(ev.pointerId);
+  if (pointers.size < 2) pinchDist = 0;
+  if (downInfo && pointers.size === 0){
+    const dt = performance.now() - downInfo.time;
+    if (downInfo.moved < 8 && dt < 450){
+      const hit = pickGround(ev.clientX, ev.clientY);
+      if (hit){
+        const r = Math.hypot(hit.x, hit.z);
+        if (r > WORLD_R){ hit.x *= WORLD_R / r; hit.z *= WORLD_R / r; }
+        creature.target.copy(hit);
+        creature.state = 'walk';
+        creature.stateTime = 0;
+        showTargetRing(hit);
+      }
+    }
+    downInfo = null;
+  }
+}
+dom.addEventListener('pointerup', endPointer);
+dom.addEventListener('pointercancel', endPointer);
+dom.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  camDistT = THREE.MathUtils.clamp(camDistT * (1 + Math.sign(ev.deltaY) * 0.09), 4.5, 20);
+  lastInteract = perfNow();
+}, { passive: false });
+
+/* 移動先マーカー */
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.3, 28),
+  new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+ring.rotation.x = -Math.PI/2;
+scene.add(ring);
+let ringTime = 99;
+function showTargetRing(p){
+  ring.position.set(p.x, heightAt(p.x, p.z) + 0.06, p.z);
+  ringTime = 0;
+}
+
+/* ============================================================
+   歩行ロジック
+============================================================ */
+const _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _hipW = new THREE.Vector3();
+const _e = new THREE.Euler();
+function damp(cur, target, lambda, dt){ return THREE.MathUtils.damp(cur, target, lambda, dt); }
+
+function pickWanderTarget(){
+  const a = Math.random() * Math.PI * 2;
+  const r = 4 + Math.random() * (WORLD_R - 7);
+  creature.target.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  /* 木の幹は避ける */
+  for (const tp of treePositions){
+    if (creature.target.distanceTo(tp) < 1.6){
+      creature.target.x += 2.2; creature.target.z += 1.4;
+    }
+  }
+}
+
+let perfT = 0;
+function perfNow(){ return perfT; }
+
+function updateCreature(dt, t){
+  /* --- AI --- */
+  creature.stateTime += dt;
+  const toTarget = _fwd.copy(creature.target).sub(creature.pos); toTarget.y = 0;
+  const distT = toTarget.length();
+  let desiredSpeed = 0;
+  if (creature.state === 'idle'){
+    if (creature.stateTime > 1.4 + (creature.seedIdle || 0)){
+      pickWanderTarget();
+      creature.state = 'walk'; creature.stateTime = 0;
+    }
+  } else if (creature.state === 'walk'){
+    if (distT < 0.55){
+      creature.state = 'idle'; creature.stateTime = 0;
+      creature.seedIdle = Math.random() * 2.4;
+    } else {
+      desiredSpeed = distT < 1.6 ? 0.85 : 2.1;
+    }
+  }
+  /* --- 旋回と前進 --- */
+  let turnRate = 0;
+  if (desiredSpeed > 0 && distT > 0.05){
+    const targetHeading = Math.atan2(toTarget.x, toTarget.z);
+    let diff = targetHeading - creature.heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const maxTurn = 1.7 * dt;
+    const turn = THREE.MathUtils.clamp(diff, -maxTurn, maxTurn);
+    creature.heading += turn;
+    turnRate = turn / Math.max(dt, 0.001);
+    desiredSpeed *= THREE.MathUtils.clamp(1.15 - Math.abs(diff) * 0.55, 0.25, 1);
+  }
+  creature.speed = damp(creature.speed, desiredSpeed, 4.5, dt);
+  const fwdX = Math.sin(creature.heading), fwdZ = Math.cos(creature.heading);
+  creature.pos.x += fwdX * creature.speed * dt;
+  creature.pos.z += fwdZ * creature.speed * dt;
+  const rr = Math.hypot(creature.pos.x, creature.pos.z);
+  if (rr > WORLD_R){ creature.pos.x *= WORLD_R / rr; creature.pos.z *= WORLD_R / rr; }
+  creature.gaitPhase += dt * (2.2 + creature.speed * 2.6) * (creature.speed > 0.03 ? 1 : 0.25);
+
+  /* --- 体の姿勢 --- */
+  groundNormal(creature.pos.x, creature.pos.z, _n);
+  const bob = Math.sin(creature.gaitPhase * 2) * 0.028 * Math.min(1, creature.speed);
+  const groundY = heightAt(creature.pos.x, creature.pos.z);
+  const targetY = groundY + STAND_H + bob;
+  creature.pos.y = damp(creature.pos.y, targetY, 9, dt);
+  body.position.copy(creature.pos);
+  const slopeF = (heightAt(creature.pos.x + fwdX * 0.9, creature.pos.z + fwdZ * 0.9)
+                - heightAt(creature.pos.x - fwdX * 0.9, creature.pos.z - fwdZ * 0.9)) / 1.8;
+  const slopeR = (heightAt(creature.pos.x + fwdZ * 0.9, creature.pos.z - fwdX * 0.9)
+                - heightAt(creature.pos.x - fwdZ * 0.9, creature.pos.z + fwdX * 0.9)) / 1.8;
+  const pitch = -Math.atan(slopeF) * 0.72;
+  const roll  =  Math.atan(slopeR) * 0.72 + Math.sin(creature.gaitPhase) * 0.02 * Math.min(1, creature.speed);
+  _e.set(
+    damp(body.rotation.x, pitch, 7, dt),
+    creature.heading,
+    damp(body.rotation.z, roll, 7, dt), 'YXZ');
+  body.rotation.copy(_e);
+  body.updateMatrixWorld(true);
+
+  /* --- 頭・耳の二次運動 --- */
+  creature.glanceTime -= dt;
+  if (creature.glanceTime < 0){
+    creature.glanceTarget = (Math.random() - 0.5) * 0.7;
+    creature.glanceTime = 1.6 + Math.random() * 2.6;
+  }
+  creature.glance = damp(creature.glance, creature.glanceTarget, 3, dt);
+  const graze = creature.state === 'idle' ? Math.max(0, Math.sin(t * 0.45)) * 0.38 : 0;
+  head.rotation.y = creature.glance + turnRate * -0.18;
+  head.rotation.x = 0.06 + graze + Math.sin(creature.gaitPhase * 2) * 0.03 * Math.min(1, creature.speed);
+  head.position.y = 0.58 - graze * 0.30;
+  head.position.z = 0.92 - graze * 0.10;
+  creature.earFlickTime -= dt;
+  if (creature.earFlickTime < 0){ creature.earFlick = 1; creature.earFlickTime = 2 + Math.random() * 4; }
+  creature.earFlick = Math.max(0, creature.earFlick - dt * 6);
+  const flick = Math.sin(creature.earFlick * Math.PI) * 0.5;
+  ears[0].rotation.x = -0.12 + Math.sin(creature.gaitPhase * 2 + 0.6) * 0.05 * Math.min(1, creature.speed) - flick;
+  ears[1].rotation.x = -0.12 + Math.sin(creature.gaitPhase * 2) * 0.05 * Math.min(1, creature.speed) - flick * 0.4;
+
+  /* --- 脚：ホーム位置とステップ（対角ペア） --- */
+  _fwd.set(fwdX, 0, fwdZ);
+  _right.set(fwdZ, 0, -fwdX);
+  for (const leg of legs){
+    _hipW.copy(leg.hip).applyMatrix4(body.matrixWorld);
+    leg.hipWorld = leg.hipWorld || new THREE.Vector3();
+    leg.hipWorld.copy(_hipW);
+    leg.home.copy(creature.pos)
+      .addScaledVector(_right, leg.hip.x * 1.06)
+      .addScaledVector(_fwd, leg.hip.z + creature.speed * 0.24)
+      .addScaledVector(_right, turnRate * (leg.front ? 0.10 : -0.06));
+    leg.home.y = heightAt(leg.home.x, leg.home.z);
+  }
+  const threshold = 0.34 + creature.speed * 0.13;
+  for (let pair = 0; pair < 2; pair++){
+    const pairLegs = legs.filter(l => l.pair === pair);
+    const otherLegs = legs.filter(l => l.pair !== pair);
+    const anyStepping = pairLegs.some(l => l.stepping);
+    const need = Math.max(...pairLegs.map(l => l.footPos.distanceTo(l.home)));
+    const otherBusy = otherLegs.some(l => l.stepping);
+    if (!anyStepping && need > threshold && (!otherBusy || need > threshold * 1.9)){
+      for (const leg of pairLegs){
+        leg.stepping = true;
+        leg.stepT = 0;
+        leg.from.copy(leg.footPos);
+        leg.to.copy(leg.home);
+        leg.stepDur = THREE.MathUtils.clamp(leg.from.distanceTo(leg.to) / (2.4 + creature.speed * 1.6), 0.15, 0.38);
+      }
+    }
+  }
+  for (const leg of legs){
+    if (leg.stepping){
+      leg.stepT += dt / leg.stepDur;
+      const k = Math.min(leg.stepT, 1);
+      const ease = k * k * (3 - 2 * k);
+      leg.footPos.lerpVectors(leg.from, leg.to, ease);
+      leg.footPos.y = THREE.MathUtils.lerp(leg.from.y, leg.to.y, ease)
+        + Math.sin(k * Math.PI) * (0.16 + creature.speed * 0.05);
+      if (k >= 1){ leg.stepping = false; leg.footPos.copy(leg.to); }
+    } else {
+      leg.footPos.y = heightAt(leg.footPos.x, leg.footPos.z);
+    }
+  }
+  /* --- IK でメッシュ配置 --- */
+  for (const leg of legs){
+    _pole.copy(_fwd).multiplyScalar(leg.front ? 1 : -1);
+    _pole.y = -0.15;
+    solveIK(leg.hipWorld, leg.footPos, _pole, leg.kneePos);
+    placeBone(leg.upper, leg.hipWorld, leg.kneePos);
+    placeBone(leg.lower, leg.kneePos, leg.footPos);
+    leg.kneeMesh.position.copy(leg.kneePos);
+    leg.footMesh.position.copy(leg.footPos).y += 0.035;
+  }
+
+  /* --- 尻尾（追従チェーン） --- */
+  const tailBase = _hipW.set(0, 0.30, -0.80).applyMatrix4(body.matrixWorld);
+  tailPts[0].copy(tailBase);
+  for (let i = 1; i < TAIL_N; i++){
+    const p = tailPts[i], prev = tailPts[i - 1];
+    p.y -= 0.55 * dt * i * 0.28;                       // 重みで垂れる
+    p.x += Math.sin(t * 1.7 + i * 0.8) * 0.05 * dt;    // ゆらぎ
+    const d = _dir.copy(p).sub(prev);
+    const len = Math.max(d.length(), 0.0001);
+    p.copy(prev).addScaledVector(d, TAIL_LEN / len);
+  }
+  for (let i = 0; i < TAIL_N; i++) tailMeshes[i].position.copy(tailPts[i]);
+
+  /* --- 骨格表示の更新 --- */
+  if (skelGroup.visible){
+    let w = 0;
+    const put = (v) => { skelPos[w++] = v.x; skelPos[w++] = v.y; skelPos[w++] = v.z; };
+    for (const leg of legs){
+      put(leg.hipWorld); put(leg.kneePos);
+      put(leg.kneePos);  put(leg.footPos);
+    }
+    const spineA = _hipW.set(0, 0.1, 0.55).applyMatrix4(body.matrixWorld); put(spineA);
+    const spineB = new THREE.Vector3(0, 0.1, -0.55).applyMatrix4(body.matrixWorld); put(spineB);
+    put(spineB); put(tailPts[TAIL_N - 1]);
+    const headW = new THREE.Vector3(); head.getWorldPosition(headW);
+    put(spineA); put(headW);
+    skelGeo.attributes.position.needsUpdate = true;
+    let ji = 0;
+    for (const leg of legs){
+      jointMeshes[ji++].position.copy(leg.hipWorld);
+      jointMeshes[ji++].position.copy(leg.kneePos);
+      jointMeshes[ji++].position.copy(leg.footPos);
+    }
+    legs.forEach((leg, i) => {
+      targetMeshes[i].position.copy(leg.home).y += 0.05;
+    });
+  }
+}
+
+/* ============================================================
+   カメラ
+============================================================ */
+const camTarget = new THREE.Vector3(0, 1.2, 0);
+function updateCamera(dt){
+  if (perfT - lastInteract > 7) camAzT += dt * 0.03;   // 静かなら緩く周回
+  camAz = damp(camAz, camAzT, 6, dt);
+  camEl = damp(camEl, camElT, 6, dt);
+  camDist = damp(camDist, camDistT, 6, dt);
+  const want = _hipW.copy(creature.pos); want.y += 1.05;
+  camTarget.x = damp(camTarget.x, want.x, 4.5, dt);
+  camTarget.y = damp(camTarget.y, want.y, 4.5, dt);
+  camTarget.z = damp(camTarget.z, want.z, 4.5, dt);
+  const cx = camTarget.x + Math.sin(camAz) * Math.cos(camEl) * camDist;
+  const cz = camTarget.z + Math.cos(camAz) * Math.cos(camEl) * camDist;
+  const cy = camTarget.y + Math.sin(camEl) * camDist;
+  camera.position.set(cx, Math.max(cy, heightAt(cx, cz) + 0.7), cz);
+  camera.lookAt(camTarget);
+}
+
+/* ============================================================
+   メインループ
+============================================================ */
+const clock = new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  perfT += dt;
+  const t = perfT;
+
+  updateCreature(dt, t);
+
+  /* 蛍の漂い */
+  {
+    const posAttr = fireflies.geometry.attributes.position;
+    const N = posAttr.count;
+    for (let i = 0; i < N; i++){
+      const bx = fireflyBase[i*4], bz = fireflyBase[i*4+1];
+      const ph = fireflyBase[i*4+2], sp = fireflyBase[i*4+3];
+      const x = bx + Math.sin(t * 0.24 * sp + ph) * 1.6;
+      const z = bz + Math.cos(t * 0.19 * sp + ph * 1.7) * 1.6;
+      const y = heightAt(x, z) + 0.7 + Math.sin(t * 0.6 * sp + ph * 2.3) * 0.45 + 0.4;
+      posAttr.setXYZ(i, x, y, z);
+    }
+    posAttr.needsUpdate = true;
+    fireflies.material.opacity = 0.75 + Math.sin(t * 1.3) * 0.25;
+  }
+
+  /* 移動先リング */
+  if (ringTime < 1.4){
+    ringTime += dt;
+    const k = ringTime / 1.4;
+    ring.material.opacity = 0.9 * (1 - k);
+    const s = 1 + k * 0.7;
+    ring.scale.set(s, s, s);
+  } else {
+    ring.material.opacity = 0;
+  }
+
+  updateCamera(dt);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
